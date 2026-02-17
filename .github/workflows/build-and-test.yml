@@ -1,0 +1,102 @@
+name: Build and Test
+on:
+  push:
+    branches:
+      - dev
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - name: Get Build Dependencies
+        id: get-build-dependencies
+        uses: ./.github/actions/setup-accl-build-env
+
+      - name: Build Emulator
+        run: |
+          cd ${{ github.workspace }}/test/model/emulator && cmake . && make -j2
+
+      - name: Build Test
+        run: |
+          source /opt/xilinx/xrt/setup.sh
+          cd ${{ github.workspace }}/test/host/xrt && cmake . && make -j2
+
+      - name: Package Deb
+        run: |
+          mkdir accl && mkdir accl/DEBIAN
+          mkdir -p accl/usr/local/bin
+          mkdir -p accl/usr/lib
+          cp ${{ github.workspace }}/test/model/emulator/cclo_emu accl/usr/local/bin/
+          cp ${{ github.workspace }}/test/host/xrt/bin/test accl/usr/local/bin/accl_test
+          cp ${{ github.workspace }}/test/host/xrt/lib/libaccl.so accl/usr/lib/
+          echo "Package: accl" > accl/DEBIAN/control
+          echo "Version: 0.1" >> accl/DEBIAN/control
+          echo "Maintainer: Lucian Petrica" >> accl/DEBIAN/control
+          echo "Architecture: all" >> accl/DEBIAN/control
+          echo "Description: Testing package for ACCL" >> accl/DEBIAN/control
+          echo "Depends: libjsoncpp1, libzmqpp4, openmpi-bin, xrt" >> accl/DEBIAN/control
+          dpkg-deb --build accl
+
+      - name: Save Testing Artifacts
+        id: save-test-artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: testing-artifacts
+          path: accl.deb
+
+  test_dma:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 10
+    needs: ["build"]
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Get Run Dependencies
+        id: get-run-dependencies
+        uses: ./.github/actions/setup-accl-run-env          
+
+      - name: Run Test
+        run: |
+          source /opt/xilinx/xrt/setup.sh
+          ACCL_EMULATOR_PATH=/usr/local/bin/cclo_emu mpirun -np 1 --allow-run-as-root accl_test --startemu --udp --gtest_filter=-*perf_counter*
+
+  test_udp:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 20
+    needs: ["build"]
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Get Run Dependencies
+        id: get-run-dependencies
+        uses: ./.github/actions/setup-accl-run-env          
+
+      - name: Run Test
+        run: |
+          source /opt/xilinx/xrt/setup.sh
+          ACCL_EMULATOR_PATH=/usr/local/bin/cclo_emu mpirun -np 2 --allow-run-as-root accl_test --startemu --udp
+
+  test_tcp:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 20
+    needs: ["build"]
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v3
+
+      - name: Get Run Dependencies
+        id: get-run-dependencies
+        uses: ./.github/actions/setup-accl-run-env          
+
+      - name: Run Test
+        run: |
+          source /opt/xilinx/xrt/setup.sh
+          ACCL_EMULATOR_PATH=/usr/local/bin/cclo_emu mpirun -np 2 --allow-run-as-root accl_test --startemu --tcp

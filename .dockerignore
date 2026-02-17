@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# Git
+.git/
+.github/
+
+# IDE
+.vscode/
+.idea/
+
+# Build artifacts
+build/
+dist/
+*.o
+*.so
+
+# Tests (not needed in production)
+test/
+tests/
+
+# Docs - exclude all docs directories
+docs/
+**/docs/
+*.md
+
+# Demo files
+demo_*.py
+
+# HLS kernels (not needed for emulator-only deployment)
+kernels/
+hlslib/
+
+# Driver subdirectories we don't need
+driver/xrt/
+driver/hls/
+
+# Proposals
+proposals/
+
+# Local files
+.env
+*.log
+*.pytest_cache
