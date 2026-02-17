@@ -203,17 +203,20 @@ async def get_cluster_status():
 @app.post("/collective/broadcast", response_model=OperationResult)
 async def broadcast(request: BroadcastRequest):
     """Execute broadcast operation."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized. POST /cluster first.")
 
-    if request.root >= len(_accl_instances):
+    if request.root >= len(instances):
         raise HTTPException(status_code=400, detail=f"Root rank {request.root} exceeds cluster size")
 
     data = np.array(request.data, dtype=np.uint8)
 
     # Execute on all ranks
     results = []
-    for rank, accl in _accl_instances.items():
+    for rank, accl in instances.items():
         result = accl.broadcast(data, root=request.root)
         results.append(result)
 
@@ -221,17 +224,20 @@ async def broadcast(request: BroadcastRequest):
         success=all(r.success for r in results),
         data=results[0].data.tolist() if results[0].data is not None else None,
         latency_ns=results[0].latency_ns,
-        message=f"Broadcast from rank {request.root} to {len(_accl_instances)} ranks"
+        message=f"Broadcast from rank {request.root} to {len(instances)} ranks"
     )
 
 
 @app.post("/collective/reduce", response_model=OperationResult)
 async def reduce(request: ReduceRequest):
     """Execute reduce operation."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized")
 
-    if request.root >= len(_accl_instances):
+    if request.root >= len(instances):
         raise HTTPException(status_code=400, detail=f"Root rank {request.root} exceeds cluster size")
 
     op = OP_MAP.get(request.operation)
@@ -244,7 +250,7 @@ async def reduce(request: ReduceRequest):
     data = np.array(request.data, dtype=np.uint8)
 
     # Execute on root rank
-    accl = _accl_instances[request.root]
+    accl = instances[request.root]
     result = accl.reduce(data, op=op, root=request.root)
 
     return OperationResult(
@@ -258,7 +264,10 @@ async def reduce(request: ReduceRequest):
 @app.post("/collective/allreduce", response_model=OperationResult)
 async def allreduce(request: AllreduceRequest):
     """Execute allreduce operation."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized")
 
     op = OP_MAP.get(request.operation)
@@ -271,25 +280,28 @@ async def allreduce(request: AllreduceRequest):
     data = np.array(request.data, dtype=np.uint8)
 
     # Execute on rank 0
-    accl = _accl_instances[0]
+    accl = instances[0]
     result = accl.allreduce(data, op=op)
 
     return OperationResult(
         success=result.success,
         data=result.data.tolist() if result.data is not None else None,
         latency_ns=result.latency_ns,
-        message=f"Allreduce ({request.operation}) across {len(_accl_instances)} ranks"
+        message=f"Allreduce ({request.operation}) across {len(instances)} ranks"
     )
 
 
 @app.post("/collective/barrier", response_model=OperationResult)
 async def barrier():
     """Execute barrier synchronization."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized")
 
     results = []
-    for accl in _accl_instances.values():
+    for accl in instances.values():
         result = accl.barrier()
         results.append(result)
 
@@ -298,7 +310,7 @@ async def barrier():
     return OperationResult(
         success=all(r.success for r in results),
         latency_ns=sum(latencies) / len(latencies),
-        message=f"Barrier synchronized {len(_accl_instances)} ranks, jitter: {max(latencies) - min(latencies):.1f}ns"
+        message=f"Barrier synchronized {len(instances)} ranks, jitter: {max(latencies) - min(latencies):.1f}ns"
     )
 
 
@@ -385,6 +397,18 @@ async def apply_gate(emulator_id: str, request: GateRequest):
 
     emulator = _emulators[emulator_id]
 
+    # Validate qubit indices against emulator size
+    if request.qubit >= emulator.num_qubits:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Qubit {request.qubit} out of range (emulator has {emulator.num_qubits} qubits)"
+        )
+    if request.target is not None and request.target >= emulator.num_qubits:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target qubit {request.target} out of range (emulator has {emulator.num_qubits} qubits)"
+        )
+
     gate_map = {
         "H": GateType.H,
         "X": GateType.X,
@@ -432,6 +456,12 @@ async def measure_qubits(emulator_id: str, qubits: Optional[List[int]] = None):
     if qubits is None:
         results = emulator.measure_all()
     else:
+        for q in qubits:
+            if q < 0 or q >= emulator.num_qubits:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Qubit index {q} out of range [0, {emulator.num_qubits})"
+                )
         results = [emulator.measure(q) for q in qubits]
 
     return {

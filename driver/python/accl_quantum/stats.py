@@ -103,8 +103,8 @@ class LatencyMonitor:
             op: deque(maxlen=window_size) for op in CollectiveOp
         }
 
-        # Full history (for offline analysis)
-        self._history: List[LatencyRecord] = []
+        # Full history (for offline analysis, capped to prevent OOM)
+        self._history: deque = deque(maxlen=10000)
         self._history_lock = threading.Lock()
 
         # Alert callbacks

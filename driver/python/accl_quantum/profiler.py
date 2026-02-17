@@ -9,7 +9,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from enum import Enum
-from collections import defaultdict
+from collections import defaultdict, deque
 import time
 import json
 import threading
@@ -139,7 +139,7 @@ class CriticalPathProfiler:
     """
 
     def __init__(self):
-        self._samples: List[ProfileSample] = []
+        self._samples: deque = deque(maxlen=10000)
         self._active_spans: Dict[str, int] = {}  # operation -> start time
         self._lock = threading.Lock()
 

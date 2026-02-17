@@ -103,6 +103,9 @@ class ACCLQuantum:
         # Latency monitoring
         self._monitor = LatencyMonitor() if config.enable_latency_monitoring else None
 
+        # Per-instance RNG (avoids shared global state)
+        self._rng = np.random.default_rng()
+
         # Hardware interface (placeholder for actual FPGA interface)
         self._hw_interface = None
 
@@ -167,8 +170,8 @@ class ACCLQuantum:
             # 4. Apply correction to local counter
 
             # Simulation: assume successful sync with small error
-            self._counter_offset = np.random.randint(-2, 3)  # +/- 2 cycles
-            self._phase_error_ns = np.random.uniform(-1.0, 1.0)  # +/- 1ns
+            self._counter_offset = int(self._rng.integers(-2, 3))  # +/- 2 cycles
+            self._phase_error_ns = float(self._rng.uniform(-1.0, 1.0))  # +/- 1ns
             self._is_synchronized = True
 
             return True
@@ -211,7 +214,7 @@ class ACCLQuantum:
         with self._lock:
             # Simulate broadcast latency
             tree_depth = int(np.ceil(np.log2(max(self.num_ranks, 2)) / np.log2(4)))
-            latency = tree_depth * 100 + np.random.normal(0, 2)  # ~100ns per hop
+            latency = tree_depth * 100 + self._rng.normal(0, 2)  # ~100ns per hop
 
             # In hardware: data flows through tree
             result_data = data.copy()

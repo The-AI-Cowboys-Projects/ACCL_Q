@@ -11,6 +11,7 @@ Total latency budget: < 500ns
 
 import numpy as np
 from typing import List, Dict, Optional, Callable, Any, Tuple
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 import time
@@ -100,11 +101,14 @@ class MeasurementFeedbackPipeline:
         self._is_armed = False
         self._pending_ops: List[Dict] = []
 
+        # Per-instance RNG (avoids shared global state)
+        self._rng = np.random.default_rng()
+
         # Callbacks
         self._action_callbacks: Dict[str, Callable] = {}
 
-        # Latency tracking
-        self._latency_history: List[FeedbackResult] = []
+        # Latency tracking (capped to prevent OOM)
+        self._latency_history: deque = deque(maxlen=1000)
 
         # Pre-allocated buffers for low latency
         self._measurement_buffer = np.zeros(64, dtype=np.uint64)
@@ -376,6 +380,12 @@ class MeasurementFeedbackPipeline:
         if not self.config.enable_pipelining:
             raise RuntimeError("Pipelining not enabled")
 
+        active = sum(1 for op in self._pending_ops if op['status'] == 'pending')
+        if active >= self.config.max_pending_operations:
+            raise RuntimeError(
+                f"Max pending operations ({self.config.max_pending_operations}) reached"
+            )
+
         op_id = len(self._pending_ops)
         self._pending_ops.append({
             'id': op_id,
@@ -424,12 +434,12 @@ class MeasurementFeedbackPipeline:
     def _acquire_measurement(self, num_qubits: int) -> np.ndarray:
         """Acquire measurement from hardware (simulated)."""
         # In real implementation: read from FPGA measurement unit
-        return np.random.randint(0, 2, num_qubits, dtype=np.uint64)
+        return self._rng.integers(0, 2, num_qubits, dtype=np.uint64)
 
     def _measure_syndrome(self) -> np.ndarray:
         """Measure QEC syndrome ancillas (simulated)."""
         # In real implementation: measure ancilla qubits
-        return np.random.randint(0, 2, 8, dtype=np.uint64)
+        return self._rng.integers(0, 2, 8, dtype=np.uint64)
 
     def _trigger_action(self, action_name: str) -> None:
         """Trigger a registered action."""
@@ -512,7 +522,7 @@ class FeedbackScheduler:
             pipeline: Feedback pipeline instance
         """
         self.pipeline = pipeline
-        self._schedule: List[Dict] = []
+        self._schedule: deque = deque(maxlen=1000)
         self._lock = threading.Lock()
 
     def add_feedback(self, feedback_type: FeedbackMode,
