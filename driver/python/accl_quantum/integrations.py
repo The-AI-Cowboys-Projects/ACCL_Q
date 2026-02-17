@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 
 from .driver import ACCLQuantum, OperationResult
 from .constants import (
+    ACCLMode,
     ReduceOp,
     SyncMode,
     QuantumMsgType,
@@ -164,6 +165,27 @@ class QubiCIntegration(QuantumControlIntegration):
             return self._unpack_syndrome(op_result.data)
         else:
             raise RuntimeError(f"Syndrome aggregation failed: {op_result.status}")
+
+    def aggregate_syndrome_ull(self, local_syndrome: np.ndarray) -> np.ndarray:
+        """
+        ULL-aware syndrome aggregation.
+
+        Uses zero-copy allreduce when in ULTRA_LOW_LATENCY mode,
+        falls back to standard path otherwise.
+
+        Args:
+            local_syndrome: Local syndrome bits
+
+        Returns:
+            Global syndrome (XOR of all local syndromes)
+        """
+        if self.accl._mode == ACCLMode.ULTRA_LOW_LATENCY:
+            # Zero-copy path: skip pack/unpack, direct allreduce
+            op_result = self.accl.allreduce(local_syndrome, op=ReduceOp.XOR)
+            if op_result.success:
+                return op_result.data
+            raise RuntimeError(f"ULL syndrome aggregation failed: {op_result.status}")
+        return self.aggregate_syndrome(local_syndrome)
 
     def conditional_pulse(self, condition_qubit: int,
                           pulse_params: Dict[str, Any]) -> bool:

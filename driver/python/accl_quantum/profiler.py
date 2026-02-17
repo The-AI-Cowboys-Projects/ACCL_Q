@@ -152,6 +152,9 @@ class CriticalPathProfiler:
             'scatter': ['serialize', 'route', 'deserialize'],
             'gather': ['serialize', 'route', 'deserialize'],
             'feedback': ['measure', 'communicate', 'decode', 'apply'],
+            'ull_feedback': ['readout', 'multicast', 'reduce', 'decode', 'trigger'],
+            'ull_broadcast': ['multicast'],
+            'ull_reduce': ['combinational_xor'],
         }
 
     def start_operation(self, operation: str, metadata: Optional[Dict] = None) -> str:
