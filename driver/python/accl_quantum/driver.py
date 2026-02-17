@@ -205,7 +205,7 @@ class ACCLQuantum:
         Returns:
             OperationResult with received data
         """
-        sync = sync or self._sync_mode
+        sync = sync if sync is not None else self._sync_mode
         start_ns = time.perf_counter_ns()
 
         with self._lock:
@@ -247,7 +247,7 @@ class ACCLQuantum:
         Returns:
             OperationResult with reduced data (at root)
         """
-        sync = sync or self._sync_mode
+        sync = sync if sync is not None else self._sync_mode
         start_ns = time.perf_counter_ns()
 
         with self._lock:
@@ -288,7 +288,7 @@ class ACCLQuantum:
         Returns:
             OperationResult with reduced data (at all ranks)
         """
-        sync = sync or self._sync_mode
+        sync = sync if sync is not None else self._sync_mode
         start_ns = time.perf_counter_ns()
 
         with self._lock:
@@ -325,7 +325,7 @@ class ACCLQuantum:
         Returns:
             OperationResult with this rank's portion
         """
-        sync = sync or self._sync_mode
+        sync = sync if sync is not None else self._sync_mode
         start_ns = time.perf_counter_ns()
 
         with self._lock:
@@ -364,7 +364,7 @@ class ACCLQuantum:
         Returns:
             OperationResult with gathered data (at root)
         """
-        sync = sync or self._sync_mode
+        sync = sync if sync is not None else self._sync_mode
         start_ns = time.perf_counter_ns()
 
         with self._lock:
@@ -402,7 +402,7 @@ class ACCLQuantum:
         Returns:
             OperationResult with all gathered data
         """
-        sync = sync or self._sync_mode
+        sync = sync if sync is not None else self._sync_mode
         start_ns = time.perf_counter_ns()
 
         with self._lock:
