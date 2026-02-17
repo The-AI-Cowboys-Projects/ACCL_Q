@@ -677,7 +677,7 @@ class TestQuantumScenarios:
         result = accl_8_ranks.allreduce(local_meas, op=ReduceOp.XOR)
         assert result.success
 
-        global_parity = result.data[0] & 1
+        global_parity = int(result.data[0]) & 1
 
         # Barrier to sync before conditional ops
         accl_8_ranks.barrier()

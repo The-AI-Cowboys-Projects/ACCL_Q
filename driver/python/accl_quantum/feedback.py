@@ -252,7 +252,7 @@ class MeasurementFeedbackPipeline:
 
         # Step 3: Decision based on parity
         decision_start = time.perf_counter_ns()
-        parity = result.data[0] & 1
+        parity = int(result.data[0]) & 1
         action_taken = False
 
         if parity == 1 and action_if_odd:
