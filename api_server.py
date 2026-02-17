@@ -392,10 +392,10 @@ async def create_emulator(request: EmulatorRequest):
 @app.post("/emulator/{emulator_id}/gate")
 async def apply_gate(emulator_id: str, request: GateRequest):
     """Apply a quantum gate."""
-    if emulator_id not in _emulators:
+    async with _state_lock:
+        emulator = _emulators.get(emulator_id)
+    if emulator is None:
         raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
-
-    emulator = _emulators[emulator_id]
 
     # Validate qubit indices against emulator size
     if request.qubit >= emulator.num_qubits:
@@ -448,10 +448,10 @@ async def apply_gate(emulator_id: str, request: GateRequest):
 @app.post("/emulator/{emulator_id}/measure")
 async def measure_qubits(emulator_id: str, qubits: Optional[List[int]] = None):
     """Measure qubits."""
-    if emulator_id not in _emulators:
+    async with _state_lock:
+        emulator = _emulators.get(emulator_id)
+    if emulator is None:
         raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
-
-    emulator = _emulators[emulator_id]
 
     if qubits is None:
         results = emulator.measure_all()
@@ -474,10 +474,10 @@ async def measure_qubits(emulator_id: str, qubits: Optional[List[int]] = None):
 @app.get("/emulator/{emulator_id}")
 async def get_emulator_state(emulator_id: str):
     """Get emulator state."""
-    if emulator_id not in _emulators:
+    async with _state_lock:
+        emulator = _emulators.get(emulator_id)
+    if emulator is None:
         raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
-
-    emulator = _emulators[emulator_id]
     stats = emulator.get_statistics()
 
     states = {}

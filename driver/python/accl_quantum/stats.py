@@ -5,12 +5,15 @@ Provides real-time latency tracking and statistical analysis for
 validating quantum timing requirements.
 """
 
+import logging
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from collections import deque
 import time
 import threading
+
+logger = logging.getLogger(__name__)
 
 from .constants import (
     CollectiveOp,
@@ -108,7 +111,7 @@ class LatencyMonitor:
         self._history_lock = threading.Lock()
 
         # Alert callbacks
-        self._alert_callbacks: List[callable] = []
+        self._alert_callbacks: List[Callable] = []
 
         # Latency targets per operation
         self._targets: Dict[CollectiveOp, float] = {
@@ -214,7 +217,7 @@ class LatencyMonitor:
             return 0.0
         return self._violations[operation] / total
 
-    def add_alert_callback(self, callback: callable) -> None:
+    def add_alert_callback(self, callback: Callable) -> None:
         """
         Add callback for target violation alerts.
 
@@ -229,7 +232,7 @@ class LatencyMonitor:
             try:
                 callback(operation, latency_ns, target_ns)
             except Exception as e:
-                print(f"Alert callback error: {e}")
+                logger.error(f"Alert callback error: {e}")
 
     def clear(self) -> None:
         """Clear all recorded data."""

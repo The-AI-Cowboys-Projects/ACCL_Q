@@ -939,10 +939,12 @@ class DeploymentManager:
         for rank, board in self.config.boards.items():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2.0)
-                sock.connect((board.ip_address, board.management_port))
-                sock.send(b'{"command": "shutdown"}')
-                sock.close()
+                try:
+                    sock.settimeout(2.0)
+                    sock.connect((board.ip_address, board.management_port))
+                    sock.send(b'{"command": "shutdown"}')
+                finally:
+                    sock.close()
             except Exception:
                 pass
 

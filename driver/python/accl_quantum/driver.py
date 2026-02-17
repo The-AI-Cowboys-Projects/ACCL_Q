@@ -6,7 +6,7 @@ communication operations.
 """
 
 import numpy as np
-from typing import List, Optional, Union, Callable
+from typing import List, Optional, Union
 from dataclasses import dataclass
 import time
 import threading
@@ -102,6 +102,7 @@ class ACCLQuantum:
 
         # Latency monitoring
         self._monitor = LatencyMonitor() if config.enable_latency_monitoring else None
+        self._latency_budget = None
 
         # Per-instance RNG (avoids shared global state)
         self._rng = np.random.default_rng()
@@ -196,7 +197,7 @@ class ACCLQuantum:
     # ========================================================================
 
     def broadcast(self, data: np.ndarray, root: int,
-                  sync: SyncMode = None) -> OperationResult:
+                  sync: Optional[SyncMode] = None) -> OperationResult:
         """
         Broadcast data from root to all ranks.
 
@@ -237,7 +238,7 @@ class ACCLQuantum:
         )
 
     def reduce(self, data: np.ndarray, op: ReduceOp, root: int,
-               sync: SyncMode = None) -> OperationResult:
+               sync: Optional[SyncMode] = None) -> OperationResult:
         """
         Reduce data to root using specified operation.
 
@@ -279,7 +280,7 @@ class ACCLQuantum:
         )
 
     def allreduce(self, data: np.ndarray, op: ReduceOp,
-                  sync: SyncMode = None) -> OperationResult:
+                  sync: Optional[SyncMode] = None) -> OperationResult:
         """
         Reduce and distribute result to all ranks.
 
@@ -316,7 +317,7 @@ class ACCLQuantum:
         )
 
     def scatter(self, data: Union[np.ndarray, List[np.ndarray]], root: int,
-                sync: SyncMode = None) -> OperationResult:
+                sync: Optional[SyncMode] = None) -> OperationResult:
         """
         Scatter different data to each rank from root.
 
@@ -355,7 +356,7 @@ class ACCLQuantum:
         )
 
     def gather(self, data: np.ndarray, root: int,
-               sync: SyncMode = None) -> OperationResult:
+               sync: Optional[SyncMode] = None) -> OperationResult:
         """
         Gather data from all ranks to root.
 
@@ -394,7 +395,7 @@ class ACCLQuantum:
         )
 
     def allgather(self, data: np.ndarray,
-                  sync: SyncMode = None) -> OperationResult:
+                  sync: Optional[SyncMode] = None) -> OperationResult:
         """
         Gather data from all ranks to all ranks.
 

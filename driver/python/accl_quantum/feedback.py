@@ -9,13 +9,16 @@ Implements end-to-end measurement-based feedback system for quantum control:
 Total latency budget: < 500ns
 """
 
+import logging
 import numpy as np
-from typing import List, Dict, Optional, Callable, Any, Tuple
+from typing import Dict, List, Optional, Callable, Any
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 import time
 import threading
+
+logger = logging.getLogger(__name__)
 
 from .driver import ACCLQuantum, OperationResult
 from .constants import (
@@ -99,7 +102,8 @@ class MeasurementFeedbackPipeline:
 
         # Pipeline state
         self._is_armed = False
-        self._pending_ops: List[Dict] = []
+        self._pending_ops: Dict[int, Dict] = {}
+        self._next_op_id = 0
 
         # Per-instance RNG (avoids shared global state)
         self._rng = np.random.default_rng()
@@ -328,7 +332,18 @@ class MeasurementFeedbackPipeline:
         # Step 3: Decode (at decoder rank)
         decode_start = time.perf_counter_ns()
         if self.accl.local_rank == self.config.decoder_rank:
-            corrections = decoder_callback(global_syndrome)
+            try:
+                corrections = decoder_callback(global_syndrome)
+            except Exception as e:
+                logger.error(f"Decoder callback failed: {e}")
+                return FeedbackResult(
+                    success=False,
+                    measurement=local_syndrome,
+                    decision=None,
+                    action_taken=False,
+                    total_latency_ns=time.perf_counter_ns() - start_ns,
+                    breakdown=breakdown
+                )
             # Prepare corrections for each rank
             corrections_list = [corrections] * self.accl.num_ranks
         else:
@@ -380,20 +395,27 @@ class MeasurementFeedbackPipeline:
         if not self.config.enable_pipelining:
             raise RuntimeError("Pipelining not enabled")
 
-        active = sum(1 for op in self._pending_ops if op['status'] == 'pending')
+        active = sum(1 for op in self._pending_ops.values() if op['status'] == 'pending')
         if active >= self.config.max_pending_operations:
             raise RuntimeError(
                 f"Max pending operations ({self.config.max_pending_operations}) reached"
             )
 
-        op_id = len(self._pending_ops)
-        self._pending_ops.append({
+        op_id = self._next_op_id
+        self._next_op_id += 1
+        self._pending_ops[op_id] = {
             'id': op_id,
             'source_rank': source_rank,
             'action': action,
             'status': 'pending',
             'result': None
-        })
+        }
+
+        # Purge completed ops if dict grows too large
+        if len(self._pending_ops) > 1000:
+            completed = [k for k, v in self._pending_ops.items() if v['status'] == 'complete']
+            for k in completed:
+                del self._pending_ops[k]
 
         # In hardware: would start non-blocking operation
         return op_id
@@ -408,7 +430,7 @@ class MeasurementFeedbackPipeline:
         Returns:
             FeedbackResult if complete, None if still pending
         """
-        if op_id >= len(self._pending_ops):
+        if op_id not in self._pending_ops:
             return None
 
         op = self._pending_ops[op_id]
@@ -445,7 +467,10 @@ class MeasurementFeedbackPipeline:
         """Trigger a registered action."""
         callback = self._action_callbacks.get(action_name)
         if callback:
-            callback()
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"Action callback '{action_name}' failed: {e}")
 
     def _apply_corrections(self, corrections: np.ndarray) -> None:
         """Apply QEC corrections (simulated)."""
@@ -523,6 +548,7 @@ class FeedbackScheduler:
         """
         self.pipeline = pipeline
         self._schedule: deque = deque(maxlen=1000)
+        self._next_entry_id = 0
         self._lock = threading.Lock()
 
     def add_feedback(self, feedback_type: FeedbackMode,
@@ -539,7 +565,8 @@ class FeedbackScheduler:
             Schedule entry ID
         """
         with self._lock:
-            entry_id = len(self._schedule)
+            entry_id = self._next_entry_id
+            self._next_entry_id += 1
             self._schedule.append({
                 'id': entry_id,
                 'type': feedback_type,

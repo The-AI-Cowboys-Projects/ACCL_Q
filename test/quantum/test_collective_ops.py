@@ -14,11 +14,9 @@ Tests verify both correctness and latency targets.
 """
 
 import numpy as np
-from dataclasses import dataclass, field
-from typing import List, Dict, Callable, Tuple, Optional
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
 from enum import Enum
-import time
-from abc import ABC, abstractmethod
 import pytest
 
 # ============================================================================
@@ -240,7 +238,7 @@ class CollectiveSimulator:
 
         # Jitter should be minimal with hardware sync
         # Simulate small jitter from clock sync imperfection
-        jitter = np.random.uniform(0, 2)  # 0-2 ns
+        jitter = np.random.default_rng().uniform(0, 2)  # 0-2 ns
 
         self._record_latency(CollectiveOp.BARRIER, margin + jitter,
                             {'max_wait': max_arrival - min(arrival_times)})
@@ -343,106 +341,66 @@ def op():
 # Test Functions
 # ============================================================================
 
-def test_broadcast(sim: CollectiveSimulator, iterations: int = 100) -> Dict:
+def test_broadcast(sim: CollectiveSimulator, iterations: int = 100):
     """Test broadcast operation."""
-    print("\nTesting Broadcast...")
-
-    passed = 0
-    failed = 0
+    rng = np.random.default_rng()
 
     for i in range(iterations):
-        root = np.random.randint(0, sim.num_ranks)
-        data = np.random.randint(0, 2**32, size=8, dtype=np.uint64)
+        root = int(rng.integers(0, sim.num_ranks))
+        data = rng.integers(0, 2**32, size=8, dtype=np.uint64)
 
         results, latency = sim.broadcast(data, root)
 
         # Verify all ranks have correct data
-        correct = all(np.array_equal(r, data) for r in results)
-
-        if correct and latency <= TARGET_BROADCAST_LATENCY_NS:
-            passed += 1
-        else:
-            failed += 1
-            if failed <= 5:  # Print first few failures
-                print(f"  FAIL iter {i}: correct={correct}, latency={latency}ns")
-
-    print(f"  Result: {passed}/{iterations} passed")
-    return {'passed': passed, 'failed': failed}
+        assert all(np.array_equal(r, data) for r in results), f"Broadcast data mismatch at iter {i}"
+        assert latency <= TARGET_BROADCAST_LATENCY_NS, f"Broadcast latency {latency}ns exceeds target"
 
 
-def test_reduce(sim: CollectiveSimulator, op: ReduceOp,
-                iterations: int = 100) -> Dict:
+def test_reduce(sim: CollectiveSimulator, op: ReduceOp = ReduceOp.XOR,
+                iterations: int = 100):
     """Test reduce operation."""
-    print(f"\nTesting Reduce ({op.name})...")
-
-    passed = 0
-    failed = 0
+    rng = np.random.default_rng()
 
     for i in range(iterations):
-        root = np.random.randint(0, sim.num_ranks)
+        root = int(rng.integers(0, sim.num_ranks))
 
         # Generate local data for each rank
         if op == ReduceOp.ADD:
-            local_data = [np.random.randint(0, 1000, size=4, dtype=np.uint64)
+            local_data = [rng.integers(0, 1000, size=4, dtype=np.uint64)
                          for _ in range(sim.num_ranks)]
         else:
-            local_data = [np.random.randint(0, 2**16, size=4, dtype=np.uint64)
+            local_data = [rng.integers(0, 2**16, size=4, dtype=np.uint64)
                          for _ in range(sim.num_ranks)]
 
         result, latency = sim.reduce(local_data, op, root)
 
-        # Verify result
         expected = reduce_operation(local_data, op)
-        correct = np.array_equal(result, expected)
-
-        if correct and latency <= TARGET_REDUCE_LATENCY_NS:
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"  Result: {passed}/{iterations} passed")
-    return {'passed': passed, 'failed': failed}
+        assert np.array_equal(result, expected), f"Reduce {op.name} mismatch at iter {i}"
+        assert latency <= TARGET_REDUCE_LATENCY_NS, f"Reduce latency {latency}ns exceeds target"
 
 
-def test_barrier(sim: CollectiveSimulator, iterations: int = 100) -> Dict:
+def test_barrier(sim: CollectiveSimulator, iterations: int = 100):
     """Test barrier operation."""
-    print("\nTesting Barrier...")
-
-    passed = 0
-    failed = 0
-    max_jitter = 0
+    rng = np.random.default_rng()
 
     for i in range(iterations):
         # Simulate staggered arrivals
         base_time = 1000  # ns
-        arrivals = [base_time + np.random.uniform(0, 50)
+        arrivals = [base_time + rng.uniform(0, 50)
                    for _ in range(sim.num_ranks)]
 
         release_time, jitter = sim.barrier(arrivals)
 
-        max_jitter = max(max_jitter, jitter)
-
-        # Verify all ranks wait for release
-        correct = all(release_time >= t for t in arrivals)
-
-        if correct and jitter <= TARGET_BARRIER_JITTER_NS:
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"  Result: {passed}/{iterations} passed, max_jitter={max_jitter:.1f}ns")
-    return {'passed': passed, 'failed': failed, 'max_jitter': max_jitter}
+        assert all(release_time >= t for t in arrivals), f"Barrier release before arrival at iter {i}"
+        assert jitter <= TARGET_BARRIER_JITTER_NS, f"Barrier jitter {jitter}ns exceeds target"
 
 
-def test_scatter_gather(sim: CollectiveSimulator, iterations: int = 100) -> Dict:
+def test_scatter_gather(sim: CollectiveSimulator, iterations: int = 100):
     """Test scatter and gather operations."""
-    print("\nTesting Scatter/Gather...")
-
-    passed = 0
-    failed = 0
+    rng = np.random.default_rng()
 
     for i in range(iterations):
-        root = np.random.randint(0, sim.num_ranks)
+        root = int(rng.integers(0, sim.num_ranks))
 
         # Scatter: root sends different data to each rank
         scatter_data = [np.array([r * 100 + i], dtype=np.uint64)
@@ -453,25 +411,12 @@ def test_scatter_gather(sim: CollectiveSimulator, iterations: int = 100) -> Dict
         gather_results, gather_latency = sim.gather(scatter_results, root)
 
         # Verify round-trip
-        correct = all(np.array_equal(scatter_data[r], gather_results[r])
-                     for r in range(sim.num_ranks))
-
-        if correct:
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"  Result: {passed}/{iterations} passed")
-    return {'passed': passed, 'failed': failed}
+        assert all(np.array_equal(scatter_data[r], gather_results[r])
+                  for r in range(sim.num_ranks)), f"Scatter/gather round-trip mismatch at iter {i}"
 
 
-def test_allgather(sim: CollectiveSimulator, iterations: int = 100) -> Dict:
+def test_allgather(sim: CollectiveSimulator, iterations: int = 100):
     """Test allgather operation."""
-    print("\nTesting Allgather...")
-
-    passed = 0
-    failed = 0
-
     for i in range(iterations):
         local_data = [np.array([r], dtype=np.uint64)
                      for r in range(sim.num_ranks)]
@@ -479,20 +424,10 @@ def test_allgather(sim: CollectiveSimulator, iterations: int = 100) -> Dict:
         results, latency = sim.allgather(local_data)
 
         # Verify all ranks have all data
-        correct = True
         for rank_results in results:
             for r, expected in enumerate(local_data):
-                if not np.array_equal(rank_results[r], expected):
-                    correct = False
-                    break
-
-        if correct:
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"  Result: {passed}/{iterations} passed")
-    return {'passed': passed, 'failed': failed}
+                assert np.array_equal(rank_results[r], expected), \
+                    f"Allgather mismatch at rank {r}, iter {i}"
 
 
 # ============================================================================
@@ -501,17 +436,14 @@ def test_allgather(sim: CollectiveSimulator, iterations: int = 100) -> Dict:
 
 def test_syndrome_aggregation(sim: CollectiveSimulator,
                               num_qubits: int = 16,
-                              iterations: int = 100) -> Dict:
+                              iterations: int = 100):
     """
     Test XOR-based syndrome aggregation for QEC.
 
     In quantum error correction, local syndromes are XORed together
     to compute a global syndrome for decoding.
     """
-    print(f"\nTesting QEC Syndrome Aggregation ({num_qubits} qubits)...")
-
-    passed = 0
-    failed = 0
+    rng = np.random.default_rng()
 
     for i in range(iterations):
         # Generate random local syndromes (simulating measurement errors)
@@ -520,64 +452,39 @@ def test_syndrome_aggregation(sim: CollectiveSimulator,
         for r in range(sim.num_ranks):
             syndrome = np.zeros(num_qubits // sim.num_ranks, dtype=np.uint64)
             for q in range(len(syndrome)):
-                if np.random.random() < error_rate:
+                if rng.random() < error_rate:
                     syndrome[q] = 1
             local_syndromes.append(syndrome)
 
         # Compute global syndrome via allreduce XOR
         results, latency = sim.allreduce(local_syndromes, ReduceOp.XOR)
 
-        # Verify all ranks have same global syndrome
-        correct = all(np.array_equal(results[0], r) for r in results)
-
-        # Verify latency is within budget for QEC
-        # Typically need < 500ns for real-time decoding
-        within_budget = latency <= 500
-
-        if correct and within_budget:
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"  Result: {passed}/{iterations} passed")
-    return {'passed': passed, 'failed': failed}
+        assert all(np.array_equal(results[0], r) for r in results), \
+            f"Syndrome mismatch across ranks at iter {i}"
+        assert latency <= 500, f"Syndrome latency {latency}ns exceeds 500ns QEC budget"
 
 
 def test_measurement_distribution(sim: CollectiveSimulator,
-                                   iterations: int = 100) -> Dict:
+                                   iterations: int = 100):
     """
     Test measurement result distribution for conditional operations.
 
     When one qubit's measurement determines operations on other qubits,
     the result must be distributed to all control boards quickly.
     """
-    print("\nTesting Measurement Distribution...")
-
-    passed = 0
-    failed = 0
+    rng = np.random.default_rng()
 
     for i in range(iterations):
         # One rank has the measurement result
-        source_rank = np.random.randint(0, sim.num_ranks)
-        measurement = np.array([np.random.randint(0, 2)], dtype=np.uint64)
+        source_rank = int(rng.integers(0, sim.num_ranks))
+        measurement = np.array([int(rng.integers(0, 2))], dtype=np.uint64)
 
         # Broadcast measurement to all ranks
         results, latency = sim.broadcast(measurement, source_rank)
 
-        # Verify all ranks have the measurement
-        correct = all(np.array_equal(r, measurement) for r in results)
-
-        # Must complete within coherence time budget
-        # Assuming 500ns budget for feedback
-        within_budget = latency <= 300
-
-        if correct and within_budget:
-            passed += 1
-        else:
-            failed += 1
-
-    print(f"  Result: {passed}/{iterations} passed")
-    return {'passed': passed, 'failed': failed}
+        assert all(np.array_equal(r, measurement) for r in results), \
+            f"Measurement distribution mismatch at iter {i}"
+        assert latency <= 300, f"Measurement distribution latency {latency}ns exceeds 300ns budget"
 
 
 # ============================================================================
@@ -602,19 +509,29 @@ def main():
     # Create simulator
     sim = CollectiveSimulator(num_ranks, p2p_latency_ns=100)
 
-    # Run basic collective tests
-    results = {}
-    results['broadcast'] = test_broadcast(sim, iterations)
-    results['reduce_xor'] = test_reduce(sim, ReduceOp.XOR, iterations)
-    results['reduce_add'] = test_reduce(sim, ReduceOp.ADD, iterations)
-    results['reduce_max'] = test_reduce(sim, ReduceOp.MAX, iterations)
-    results['barrier'] = test_barrier(sim, iterations)
-    results['scatter_gather'] = test_scatter_gather(sim, iterations)
-    results['allgather'] = test_allgather(sim, iterations)
+    # Run all tests — each raises AssertionError on failure
+    tests = [
+        ("broadcast", lambda: test_broadcast(sim, iterations)),
+        ("reduce_xor", lambda: test_reduce(sim, ReduceOp.XOR, iterations)),
+        ("reduce_add", lambda: test_reduce(sim, ReduceOp.ADD, iterations)),
+        ("reduce_max", lambda: test_reduce(sim, ReduceOp.MAX, iterations)),
+        ("barrier", lambda: test_barrier(sim, iterations)),
+        ("scatter_gather", lambda: test_scatter_gather(sim, iterations)),
+        ("allgather", lambda: test_allgather(sim, iterations)),
+        ("syndrome", lambda: test_syndrome_aggregation(sim, iterations=iterations)),
+        ("measurement_dist", lambda: test_measurement_distribution(sim, iterations)),
+    ]
 
-    # Run quantum-specific tests
-    results['syndrome'] = test_syndrome_aggregation(sim, iterations=iterations)
-    results['measurement_dist'] = test_measurement_distribution(sim, iterations)
+    passed = 0
+    failed = 0
+    for name, test_fn in tests:
+        try:
+            test_fn()
+            print(f"  {name}: PASS")
+            passed += 1
+        except AssertionError as e:
+            print(f"  {name}: FAIL - {e}")
+            failed += 1
 
     # Print latency statistics
     print("\n" + "=" * 60)
@@ -634,19 +551,14 @@ def main():
     print("\n" + "=" * 60)
     print("Test Summary")
     print("=" * 60)
-
-    total_passed = sum(r.get('passed', 0) for r in results.values())
-    total_failed = sum(r.get('failed', 0) for r in results.values())
-
-    print(f"\nTotal: {total_passed} passed, {total_failed} failed")
+    print(f"\nTotal: {passed} passed, {failed} failed")
 
     # Target validation
     print("\nLatency Target Validation:")
     print(f"  Broadcast: {'PASS' if stats.get('BROADCAST', {}).get('max_ns', 999) <= TARGET_BROADCAST_LATENCY_NS else 'FAIL'}")
     print(f"  Reduce: {'PASS' if stats.get('REDUCE', {}).get('max_ns', 999) <= TARGET_REDUCE_LATENCY_NS else 'FAIL'}")
-    print(f"  Barrier jitter: {'PASS' if results['barrier'].get('max_jitter', 999) <= TARGET_BARRIER_JITTER_NS else 'FAIL'}")
 
-    return 0 if total_failed == 0 else 1
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":
