@@ -33,6 +33,10 @@ from .constants import (
     ULL_TARGET_TOTAL_NS,
     ULL_MAX_SYNDROME_BITS,
     ULL_MAX_JITTER_NS,
+    SIM_PER_HOP_LATENCY_NS,
+    SIM_REDUCE_OVERHEAD_NS,
+    SIM_JITTER_STD_NS,
+    SIM_TREE_FANOUT,
 )
 from .stats import LatencyMonitor, LatencyStats, LatencyProfiler
 
@@ -237,8 +241,8 @@ class ACCLQuantum:
 
         with self._lock:
             # Simulate broadcast latency
-            tree_depth = int(np.ceil(np.log2(max(self.num_ranks, 2)) / np.log2(4)))
-            latency = tree_depth * 100 + self._rng.normal(0, 2)  # ~100ns per hop
+            tree_depth = int(np.ceil(np.log2(max(self.num_ranks, 2)) / np.log2(SIM_TREE_FANOUT)))
+            latency = tree_depth * SIM_PER_HOP_LATENCY_NS + self._rng.normal(0, SIM_JITTER_STD_NS)
 
             # In hardware: data flows through tree
             result_data = data.copy()
@@ -286,8 +290,8 @@ class ACCLQuantum:
             result_data = data.copy()
 
             # Simulate tree reduce latency
-            tree_depth = int(np.ceil(np.log2(max(self.num_ranks, 2)) / np.log2(4)))
-            latency = tree_depth * 100 + 5  # Reduction adds ~5ns per level
+            tree_depth = int(np.ceil(np.log2(max(self.num_ranks, 2)) / np.log2(SIM_TREE_FANOUT)))
+            latency = tree_depth * SIM_PER_HOP_LATENCY_NS + SIM_REDUCE_OVERHEAD_NS
 
         end_ns = time.perf_counter_ns()
         actual_latency = end_ns - start_ns

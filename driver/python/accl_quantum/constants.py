@@ -48,6 +48,12 @@ PROTOCOL_LATENCY_NS = 80
 FIBER_DELAY_NS_PER_METER = 5
 DEFAULT_FIBER_LENGTH_M = 10
 
+# Simulation model parameters
+SIM_PER_HOP_LATENCY_NS = 100    # Simulated per-hop latency in tree operations
+SIM_REDUCE_OVERHEAD_NS = 5      # Additional latency per reduction level
+SIM_JITTER_STD_NS = 2           # Standard deviation of simulated jitter
+SIM_TREE_FANOUT = 4             # Default tree fanout for latency estimation
+
 # Clock synchronization
 MAX_PHASE_ERROR_NS = 1.0
 MAX_COUNTER_SYNC_ERROR_CYCLES = 2

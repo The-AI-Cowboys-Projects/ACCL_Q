@@ -39,18 +39,18 @@ class QuantumControlIntegration(ABC):
     @abstractmethod
     def configure(self, **kwargs) -> None:
         """Configure the integration."""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def distribute_measurement(self, results: np.ndarray,
                                source_rank: int) -> np.ndarray:
         """Distribute measurement results."""
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def aggregate_syndrome(self, local_syndrome: np.ndarray) -> np.ndarray:
         """Aggregate QEC syndrome data."""
-        pass
+        raise NotImplementedError
 
 
 # ============================================================================
@@ -319,13 +319,11 @@ class QubiCIntegration(QuantumControlIntegration):
         return min(qubit_index // qubits_per_rank, self.accl.num_ranks - 1)
 
     def _compute_syndrome(self, measurements: np.ndarray) -> np.ndarray:
-        """Compute error syndrome from measurements."""
-        # Simple parity check syndrome
+        """Compute error syndrome from measurements (vectorized)."""
         n = len(measurements)
-        syndrome = np.zeros(n // 2, dtype=np.int32)
-        for i in range(len(syndrome)):
-            syndrome[i] = measurements[2*i] ^ measurements[2*i + 1]
-        return syndrome
+        even = measurements[:n - n % 2:2].astype(np.int32)
+        odd = measurements[1:n - n % 2:2].astype(np.int32)
+        return even ^ odd
 
     def _decode_syndrome(self, syndrome: np.ndarray) -> np.ndarray:
         """Decode syndrome to determine corrections."""

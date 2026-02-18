@@ -44,25 +44,36 @@ class DMABufferPool:
 
     def __init__(self, num_buffers: int = ULL_DMA_BUFFER_POOL_SIZE,
                  buffer_size_bytes: int = 64,
-                 alignment: int = ULL_DMA_BUFFER_ALIGNMENT):
+                 alignment: int = ULL_DMA_BUFFER_ALIGNMENT,
+                 lazy: bool = False):
         self._alignment = alignment
         self._buffer_size = buffer_size_bytes
         self._total = num_buffers
+        self._lazy = lazy
 
-        # Pre-allocate aligned buffers
+        # Buffer storage
         self._free: deque = deque()
         self._all_buffers: List[np.ndarray] = []
-        for _ in range(num_buffers):
-            # numpy arrays are typically aligned, but we ensure element count
-            # is a multiple of alignment / element_size
-            buf = np.zeros(buffer_size_bytes, dtype=np.uint8)
+        self._acquired_count = 0
+        self._initialized = False
+
+        if not lazy:
+            self._allocate_buffers()
+
+    def _allocate_buffers(self) -> None:
+        """Pre-allocate aligned buffers."""
+        if self._initialized:
+            return
+        for _ in range(self._total):
+            buf = np.zeros(self._buffer_size, dtype=np.uint8)
             self._all_buffers.append(buf)
             self._free.append(buf)
-
-        self._acquired_count = 0
+        self._initialized = True
 
     def acquire(self) -> np.ndarray:
         """Acquire a buffer from the pool. Raises RuntimeError if exhausted."""
+        if not self._initialized:
+            self._allocate_buffers()
         if not self._free:
             raise RuntimeError(
                 f"DMA buffer pool exhausted ({self._total} buffers in use)"
@@ -78,6 +89,8 @@ class DMABufferPool:
 
     def get_buffer(self, index: int) -> np.ndarray:
         """Get a buffer by index (zero-copy access to pre-allocated pool)."""
+        if not self._initialized:
+            self._allocate_buffers()
         if index < 0 or index >= self._total:
             raise IndexError(f"Buffer index {index} out of range [0, {self._total})")
         return self._all_buffers[index]

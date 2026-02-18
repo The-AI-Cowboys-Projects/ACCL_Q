@@ -627,6 +627,17 @@ class FeedbackScheduler:
         with self._lock:
             self._schedule.clear()
 
+    def __enter__(self):
+        """Arm the pipeline when entering context."""
+        self.pipeline.arm()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Disarm the pipeline and clear schedule on exit."""
+        self.pipeline.disarm()
+        self.clear_schedule()
+        return False
+
 
 # ============================================================================
 # Ultra-Low-Latency Feedback

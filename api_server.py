@@ -6,6 +6,7 @@ Provides HTTP endpoints for quantum collective operations simulation.
 """
 
 import asyncio
+import logging
 import os
 import time
 import uuid
@@ -14,9 +15,12 @@ import numpy as np
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 # ACCL-Q imports
 from accl_quantum import (
@@ -37,7 +41,9 @@ from accl_quantum.hardware_accel import HardwareAccelerator
 from accl_quantum.constants import ULLPipelineConfig, ULL_TARGET_TOTAL_NS
 
 # Constants
-MAX_EMULATORS = 50
+MAX_EMULATORS = int(os.environ.get("ACCLQ_MAX_EMULATORS", "50"))
+EMULATOR_TTL_SECONDS = int(os.environ.get("ACCLQ_EMULATOR_TTL", "3600"))
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("ACCLQ_RATE_LIMIT", "300"))
 
 OP_MAP = {
     "xor": ReduceOp.XOR,
@@ -56,7 +62,24 @@ MODE_MAP = {
 # Global instances
 _accl_instances: Dict[int, ACCLQuantum] = {}
 _emulators: Dict[str, RealisticQubitEmulator] = {}
+_emulator_timestamps: Dict[str, float] = {}  # emulator_id -> creation time
+_rate_limit_counts: Dict[str, List[float]] = {}  # ip -> [timestamps]
 _state_lock = asyncio.Lock()
+
+
+def _cleanup_stale_emulators() -> int:
+    """Remove emulators that have exceeded TTL. Returns count removed."""
+    now = time.time()
+    stale = [
+        eid for eid, ts in _emulator_timestamps.items()
+        if now - ts > EMULATOR_TTL_SECONDS
+    ]
+    for eid in stale:
+        _emulators.pop(eid, None)
+        _emulator_timestamps.pop(eid, None)
+    if stale:
+        logger.info(f"Cleaned up {len(stale)} stale emulators")
+    return len(stale)
 
 
 # Request/Response models
@@ -110,11 +133,13 @@ class OperationResult(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize on startup."""
-    print("ACCL-Q API Server starting...")
+    logger.info("ACCL-Q API Server starting...")
     yield
-    print("ACCL-Q API Server shutting down...")
+    logger.info("ACCL-Q API Server shutting down...")
     _accl_instances.clear()
     _emulators.clear()
+    _emulator_timestamps.clear()
+    _rate_limit_counts.clear()
 
 
 app = FastAPI(
@@ -131,6 +156,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """Simple in-memory rate limiter per client IP."""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    window_start = now - 60
+
+    # Get or create timestamp list for this IP
+    timestamps = _rate_limit_counts.get(client_ip, [])
+    # Remove timestamps outside the 1-minute window
+    timestamps = [t for t in timestamps if t > window_start]
+
+    if len(timestamps) >= RATE_LIMIT_PER_MINUTE:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Rate limit exceeded. Try again later."},
+        )
+
+    timestamps.append(now)
+    _rate_limit_counts[client_ip] = timestamps
+    return await call_next(request)
 
 
 # Health & Status
@@ -367,6 +415,9 @@ async def qec_syndrome(request: QECRequest):
 async def create_emulator(request: EmulatorRequest):
     """Create a qubit emulator instance."""
     async with _state_lock:
+        # Clean up stale emulators before checking limit
+        _cleanup_stale_emulators()
+
         if len(_emulators) >= MAX_EMULATORS:
             raise HTTPException(
                 status_code=429,
@@ -382,6 +433,7 @@ async def create_emulator(request: EmulatorRequest):
         emulator_id = str(uuid.uuid4())
         emulator = RealisticQubitEmulator(num_qubits=request.num_qubits, noise_params=noise)
         _emulators[emulator_id] = emulator
+        _emulator_timestamps[emulator_id] = time.time()
 
     return {
         "emulator_id": emulator_id,
@@ -510,6 +562,7 @@ async def delete_emulator(emulator_id: str):
             raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
 
         del _emulators[emulator_id]
+        _emulator_timestamps.pop(emulator_id, None)
     return {"success": True, "message": f"Emulator {emulator_id} deleted"}
 
 
@@ -573,6 +626,8 @@ async def ull_configure(request: ULLConfigRequest):
 @app.post("/ull/feedback")
 async def ull_feedback(num_cycles: int = 1):
     """Run ULL autonomous feedback cycle(s)."""
+    if num_cycles < 1 or num_cycles > 10000:
+        raise HTTPException(status_code=400, detail="num_cycles must be between 1 and 10000")
     if _ull_engine is None:
         raise HTTPException(
             status_code=400,
