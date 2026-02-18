@@ -33,16 +33,30 @@ from .constants import (
     OperationStatus,
     QuantumMsgType,
     LatencyBudget,
+    ULLPipelineConfig,
     CLOCK_PERIOD_NS,
     TARGET_P2P_LATENCY_NS,
     TARGET_BROADCAST_LATENCY_NS,
     TARGET_REDUCE_LATENCY_NS,
     MAX_JITTER_NS,
     FEEDBACK_LATENCY_BUDGET_NS,
+    ULL_TARGET_TOTAL_NS,
+    ULL_MAX_SYNDROME_BITS,
 )
 from .stats import LatencyStats, LatencyMonitor, LatencyProfiler
 from .integrations import QubiCIntegration, QICKIntegration, UnifiedQuantumControl
-from .feedback import MeasurementFeedbackPipeline, FeedbackScheduler
+from .feedback import (
+    MeasurementFeedbackPipeline,
+    FeedbackScheduler,
+    HardwareFeedbackEngine,
+    ULLFeedbackResult,
+)
+from .hardware_accel import (
+    DMABufferPool,
+    LUTDecoder,
+    FPGARegisterInterface,
+    HardwareAccelerator,
+)
 from .deployment import (
     BoardConfig,
     BoardType,
@@ -72,7 +86,7 @@ from .profiler import (
     Recommendation,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     # Core driver
     "ACCLQuantum",
@@ -94,9 +108,18 @@ __all__ = [
     "QubiCIntegration",
     "QICKIntegration",
     "UnifiedQuantumControl",
+    # ULL Pipeline Config
+    "ULLPipelineConfig",
     # Feedback pipeline
     "MeasurementFeedbackPipeline",
     "FeedbackScheduler",
+    "HardwareFeedbackEngine",
+    "ULLFeedbackResult",
+    # Hardware acceleration
+    "DMABufferPool",
+    "LUTDecoder",
+    "FPGARegisterInterface",
+    "HardwareAccelerator",
     # Deployment
     "BoardConfig",
     "BoardType",
@@ -129,4 +152,6 @@ __all__ = [
     "TARGET_REDUCE_LATENCY_NS",
     "MAX_JITTER_NS",
     "FEEDBACK_LATENCY_BUDGET_NS",
+    "ULL_TARGET_TOTAL_NS",
+    "ULL_MAX_SYNDROME_BITS",
 ]

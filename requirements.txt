@@ -1,0 +1,12 @@
+# Core dependency
+numpy>=1.24
+
+# API server
+fastapi>=0.100
+uvicorn[standard]>=0.23
+pydantic>=2.0
+
+# Development/testing
+pytest>=7.0
+pytest-asyncio>=0.21
+httpx>=0.24

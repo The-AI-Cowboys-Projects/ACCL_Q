@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'driver',
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
 from fastapi.testclient import TestClient
-from api_server import app, _accl_instances, _emulators
+from api_server import app, _accl_instances, _emulators, _emulator_timestamps, _rate_limit_counts
 
 
 @pytest.fixture()
@@ -18,10 +18,14 @@ def client():
     """TestClient that clears global state between tests."""
     _accl_instances.clear()
     _emulators.clear()
+    _emulator_timestamps.clear()
+    _rate_limit_counts.clear()
     with TestClient(app) as c:
         yield c
     _accl_instances.clear()
     _emulators.clear()
+    _emulator_timestamps.clear()
+    _rate_limit_counts.clear()
 
 
 @pytest.fixture()

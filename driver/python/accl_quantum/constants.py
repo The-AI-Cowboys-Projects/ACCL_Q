@@ -30,11 +30,29 @@ TARGET_GATHER_LATENCY_NS = 300
 MAX_JITTER_NS = 10
 FEEDBACK_LATENCY_BUDGET_NS = 500
 
+# Ultra-Low-Latency (ULL) timing targets
+ULL_TARGET_MULTICAST_NS = 10    # Simplified Aurora for on-board/short-link
+ULL_TARGET_REDUCE_NS = 4        # Combinational XOR (1-2 cycles)
+ULL_TARGET_DECODE_NS = 8        # BRAM LUT decoder (4 cycles)
+ULL_TARGET_TRIGGER_NS = 2       # Hardware trigger assertion (1 cycle)
+ULL_TARGET_TOTAL_NS = 50        # Total feedback budget
+ULL_MAX_JITTER_NS = 2
+ULL_MAX_SYNDROME_BITS = 512
+ULL_LUT_DECODER_DEPTH = 4096
+ULL_DMA_BUFFER_ALIGNMENT = 64
+ULL_DMA_BUFFER_POOL_SIZE = 16
+
 # Component latencies
 AURORA_PHY_LATENCY_NS = 40
 PROTOCOL_LATENCY_NS = 80
 FIBER_DELAY_NS_PER_METER = 5
 DEFAULT_FIBER_LENGTH_M = 10
+
+# Simulation model parameters
+SIM_PER_HOP_LATENCY_NS = 100    # Simulated per-hop latency in tree operations
+SIM_REDUCE_OVERHEAD_NS = 5      # Additional latency per reduction level
+SIM_JITTER_STD_NS = 2           # Standard deviation of simulated jitter
+SIM_TREE_FANOUT = 4             # Default tree fanout for latency estimation
 
 # Clock synchronization
 MAX_PHASE_ERROR_NS = 1.0
@@ -63,6 +81,7 @@ class ACCLMode(IntEnum):
     STANDARD = 0       # Standard ACCL behavior (TCP/UDP)
     DETERMINISTIC = 1  # Deterministic timing mode (Aurora-direct)
     LOW_LATENCY = 2    # Optimized for minimum latency
+    ULTRA_LOW_LATENCY = 3  # Hardware-autonomous sub-50ns feedback
 
 
 class ReduceOp(IntEnum):
@@ -135,6 +154,21 @@ class ACCLConfig:
 
 
 @dataclass
+class ULLPipelineConfig:
+    """Configuration for Ultra-Low-Latency hardware pipeline."""
+    max_syndrome_bits: int = ULL_MAX_SYNDROME_BITS
+    decoder_type: str = 'lut'         # 'lut' (BRAM lookup) or 'combinational'
+    lut_depth: int = ULL_LUT_DECODER_DEPTH
+    use_hardware_multicast: bool = True
+    use_combinational_reduce: bool = True
+    coherence_time_us: float = 50.0
+    auto_trigger: bool = True
+    bypass_monitoring: bool = True
+    dma_buffer_count: int = ULL_DMA_BUFFER_POOL_SIZE
+    fiber_length_m: float = 1.0       # Short links for ULL
+
+
+@dataclass
 class LatencyBudget:
     """Latency budget for quantum operations."""
     total_budget_ns: float
@@ -143,10 +177,15 @@ class LatencyBudget:
     margin_ns: float = 50.0
 
     @classmethod
-    def for_qec_cycle(cls, coherence_time_us: float = 100.0) -> "LatencyBudget":
-        """Create budget for QEC error correction cycle."""
-        # QEC cycle must complete in fraction of coherence time
-        total = coherence_time_us * 1000 * 0.1  # 10% of coherence time
+    def for_qec_cycle(cls, coherence_time_us: float = 100.0,
+                      coherence_budget_pct: float = 10.0) -> "LatencyBudget":
+        """Create budget for QEC error correction cycle.
+
+        Args:
+            coherence_time_us: Qubit coherence time in microseconds
+            coherence_budget_pct: Percentage of coherence time allocated
+        """
+        total = coherence_time_us * 1000 * (coherence_budget_pct / 100.0)
         return cls(
             total_budget_ns=total,
             communication_budget_ns=total * 0.6,
@@ -162,6 +201,20 @@ class LatencyBudget:
             communication_budget_ns=300,
             computation_budget_ns=150,
             margin_ns=50
+        )
+
+    @classmethod
+    def for_ull_feedback(cls, coherence_time_us: float = 50.0) -> "LatencyBudget":
+        """Create ultra-low-latency budget: 0.1% of coherence time.
+
+        For 50us coherence time, budget = 50ns.
+        """
+        total = coherence_time_us * 1000 * 0.001  # 0.1% of coherence time
+        return cls(
+            total_budget_ns=total,
+            communication_budget_ns=total * 0.5,
+            computation_budget_ns=total * 0.4,
+            margin_ns=total * 0.1
         )
 
 

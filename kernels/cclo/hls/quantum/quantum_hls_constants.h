@@ -118,6 +118,19 @@
 #define SYNC_HDR_PAYLOAD_END        47
 
 // ============================================================================
+// Ultra-Low-Latency (ULL) Pipeline Constants
+// ============================================================================
+
+#define ULL_MULTICAST_LATENCY_CYCLES    5     // 10 ns at 500 MHz
+#define ULL_REDUCE_LATENCY_CYCLES       2     // 4 ns
+#define ULL_DECODE_LATENCY_CYCLES       4     // 8 ns
+#define ULL_TRIGGER_LATENCY_CYCLES      1     // 2 ns
+#define ULL_TOTAL_LATENCY_CYCLES        25    // 50 ns budget
+#define ULL_MAX_SYNDROME_BITS           512
+#define ULL_LUT_DECODER_DEPTH           4096
+#define ULL_PIPE_STAGES                 1     // Single-stage for minimum latency
+
+// ============================================================================
 // Type Definitions
 // ============================================================================
 

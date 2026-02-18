@@ -12,14 +12,15 @@ Tests realistic quantum control scenarios combining:
 Run with: python -m pytest test_integration.py -v
 """
 
+import os
+import sys
+import time
+from typing import List
+
 import numpy as np
 import pytest
-import time
-from typing import List, Dict, Tuple
-from dataclasses import dataclass
 
-import sys
-sys.path.insert(0, '../../driver/python')
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'driver', 'python'))
 
 from accl_quantum import (
     ACCLQuantum,
@@ -106,6 +107,7 @@ class QubitEmulator:
         self.num_qubits = num_qubits
         self.t1 = t1_us * 1e-6
         self.t2 = t2_us * 1e-6
+        self._rng = np.random.default_rng()
         self.state = np.zeros(num_qubits, dtype=np.complex128)
         self.reset()
 
@@ -137,10 +139,10 @@ class QubitEmulator:
         for i, q in enumerate(qubits):
             # Ideal outcome based on state amplitude
             prob_one = np.abs(self.state[q]) ** 2
-            outcome = 1 if np.random.random() < prob_one else 0
+            outcome = 1 if self._rng.random() < prob_one else 0
 
             # Apply measurement error
-            if np.random.random() < error_rate:
+            if self._rng.random() < error_rate:
                 outcome = 1 - outcome
 
             outcomes[i] = outcome
@@ -224,7 +226,7 @@ class TestLatencyRequirements:
 
     def test_broadcast_latency(self, accl_8_ranks):
         """Test broadcast meets latency target."""
-        data = np.random.randint(0, 2**32, 8, dtype=np.uint64)
+        data = np.random.default_rng().integers(0, 2**32, 8, dtype=np.uint64)
 
         latencies = []
         for _ in range(100):
@@ -241,7 +243,7 @@ class TestLatencyRequirements:
 
     def test_reduce_latency(self, accl_8_ranks):
         """Test reduce meets latency target."""
-        data = np.random.randint(0, 2**16, 4, dtype=np.uint64)
+        data = np.random.default_rng().integers(0, 2**16, 4, dtype=np.uint64)
 
         latencies = []
         for _ in range(100):
@@ -583,7 +585,7 @@ class TestQuantumScenarios:
         5. Apply corrections
         """
         # Each rank measures local syndrome
-        local_syndrome = np.random.randint(0, 2, 4, dtype=np.uint64)
+        local_syndrome = np.random.default_rng().integers(0, 2, 4, dtype=np.uint64)
 
         # Aggregate
         result = accl_8_ranks.allreduce(local_syndrome, op=ReduceOp.XOR)
@@ -642,7 +644,7 @@ class TestQuantumScenarios:
             start = time.perf_counter_ns()
 
             # Measure syndrome
-            local_syndrome = np.random.randint(0, 2, 4, dtype=np.uint64)
+            local_syndrome = np.random.default_rng().integers(0, 2, 4, dtype=np.uint64)
 
             # Aggregate
             result = accl_8_ranks.allreduce(local_syndrome, op=ReduceOp.XOR)
@@ -671,7 +673,7 @@ class TestQuantumScenarios:
         conditional operations applied based on collective outcome.
         """
         # Each rank provides a measurement
-        local_meas = np.array([np.random.randint(0, 2)], dtype=np.uint64)
+        local_meas = np.array([np.random.default_rng().integers(0, 2)], dtype=np.uint64)
 
         # Compute global parity
         result = accl_8_ranks.allreduce(local_meas, op=ReduceOp.XOR)
@@ -712,7 +714,7 @@ class TestStressPerformance:
     def test_large_data_transfer(self, accl_8_ranks):
         """Test transfer of large data arrays."""
         # 1KB of data
-        data = np.random.randint(0, 2**32, 128, dtype=np.uint64)
+        data = np.random.default_rng().integers(0, 2**32, 128, dtype=np.uint64)
 
         result = accl_8_ranks.broadcast(data, root=0)
         assert result.success
@@ -722,7 +724,7 @@ class TestStressPerformance:
         """Test mix of different operations."""
         for _ in range(100):
             # Random operation
-            op_type = np.random.randint(0, 4)
+            op_type = np.random.default_rng().integers(0, 4)
 
             if op_type == 0:
                 accl_8_ranks.broadcast(np.array([1], dtype=np.uint64), root=0)

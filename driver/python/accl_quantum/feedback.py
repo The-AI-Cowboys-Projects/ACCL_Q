@@ -9,13 +9,16 @@ Implements end-to-end measurement-based feedback system for quantum control:
 Total latency budget: < 500ns
 """
 
+import logging
 import numpy as np
-from typing import List, Dict, Optional, Callable, Any, Tuple
+from typing import Dict, List, Optional, Callable, Any
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 import time
 import threading
+
+logger = logging.getLogger(__name__)
 
 from .driver import ACCLQuantum, OperationResult
 from .constants import (
@@ -24,6 +27,12 @@ from .constants import (
     QuantumMsgType,
     FEEDBACK_LATENCY_BUDGET_NS,
     CLOCK_PERIOD_NS,
+    ULL_TARGET_MULTICAST_NS,
+    ULL_TARGET_REDUCE_NS,
+    ULL_TARGET_DECODE_NS,
+    ULL_TARGET_TRIGGER_NS,
+    ULL_TARGET_TOTAL_NS,
+    ULLPipelineConfig,
 )
 from .stats import LatencyMonitor, LatencyProfiler, CollectiveOp
 
@@ -99,7 +108,8 @@ class MeasurementFeedbackPipeline:
 
         # Pipeline state
         self._is_armed = False
-        self._pending_ops: List[Dict] = []
+        self._pending_ops: Dict[int, Dict] = {}
+        self._next_op_id = 0
 
         # Per-instance RNG (avoids shared global state)
         self._rng = np.random.default_rng()
@@ -328,7 +338,18 @@ class MeasurementFeedbackPipeline:
         # Step 3: Decode (at decoder rank)
         decode_start = time.perf_counter_ns()
         if self.accl.local_rank == self.config.decoder_rank:
-            corrections = decoder_callback(global_syndrome)
+            try:
+                corrections = decoder_callback(global_syndrome)
+            except Exception as e:
+                logger.error(f"Decoder callback failed: {e}")
+                return FeedbackResult(
+                    success=False,
+                    measurement=local_syndrome,
+                    decision=None,
+                    action_taken=False,
+                    total_latency_ns=time.perf_counter_ns() - start_ns,
+                    breakdown=breakdown
+                )
             # Prepare corrections for each rank
             corrections_list = [corrections] * self.accl.num_ranks
         else:
@@ -380,20 +401,27 @@ class MeasurementFeedbackPipeline:
         if not self.config.enable_pipelining:
             raise RuntimeError("Pipelining not enabled")
 
-        active = sum(1 for op in self._pending_ops if op['status'] == 'pending')
+        active = sum(1 for op in self._pending_ops.values() if op['status'] == 'pending')
         if active >= self.config.max_pending_operations:
             raise RuntimeError(
                 f"Max pending operations ({self.config.max_pending_operations}) reached"
             )
 
-        op_id = len(self._pending_ops)
-        self._pending_ops.append({
+        op_id = self._next_op_id
+        self._next_op_id += 1
+        self._pending_ops[op_id] = {
             'id': op_id,
             'source_rank': source_rank,
             'action': action,
             'status': 'pending',
             'result': None
-        })
+        }
+
+        # Purge completed ops if dict grows too large
+        if len(self._pending_ops) > 1000:
+            completed = [k for k, v in self._pending_ops.items() if v['status'] == 'complete']
+            for k in completed:
+                del self._pending_ops[k]
 
         # In hardware: would start non-blocking operation
         return op_id
@@ -408,7 +436,7 @@ class MeasurementFeedbackPipeline:
         Returns:
             FeedbackResult if complete, None if still pending
         """
-        if op_id >= len(self._pending_ops):
+        if op_id not in self._pending_ops:
             return None
 
         op = self._pending_ops[op_id]
@@ -445,7 +473,10 @@ class MeasurementFeedbackPipeline:
         """Trigger a registered action."""
         callback = self._action_callbacks.get(action_name)
         if callback:
-            callback()
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"Action callback '{action_name}' failed: {e}")
 
     def _apply_corrections(self, corrections: np.ndarray) -> None:
         """Apply QEC corrections (simulated)."""
@@ -523,6 +554,7 @@ class FeedbackScheduler:
         """
         self.pipeline = pipeline
         self._schedule: deque = deque(maxlen=1000)
+        self._next_entry_id = 0
         self._lock = threading.Lock()
 
     def add_feedback(self, feedback_type: FeedbackMode,
@@ -539,7 +571,8 @@ class FeedbackScheduler:
             Schedule entry ID
         """
         with self._lock:
-            entry_id = len(self._schedule)
+            entry_id = self._next_entry_id
+            self._next_entry_id += 1
             self._schedule.append({
                 'id': entry_id,
                 'type': feedback_type,
@@ -593,3 +626,223 @@ class FeedbackScheduler:
         """Clear the schedule."""
         with self._lock:
             self._schedule.clear()
+
+    def __enter__(self):
+        """Arm the pipeline when entering context."""
+        self.pipeline.arm()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Disarm the pipeline and clear schedule on exit."""
+        self.pipeline.disarm()
+        self.clear_schedule()
+        return False
+
+
+# ============================================================================
+# Ultra-Low-Latency Feedback
+# ============================================================================
+
+@dataclass
+class ULLFeedbackResult:
+    """Result of a ULL hardware-autonomous feedback cycle."""
+    success: bool
+    total_latency_ns: float
+    phases: Dict[str, float] = field(default_factory=dict)
+    within_budget: bool = False
+    execution_id: int = 0
+    syndrome: Optional[np.ndarray] = None
+    correction: Optional[np.ndarray] = None
+
+    def __post_init__(self):
+        self.within_budget = self.total_latency_ns <= ULL_TARGET_TOTAL_NS
+
+
+class HardwareFeedbackEngine:
+    """
+    Hardware-autonomous feedback engine for ULL operation.
+
+    Python programs the FPGA once (LUT, registers, trigger map), then the
+    FPGA runs the feedback loop independently. Python only reads back
+    results and statistics.
+
+    Pipeline phases (hardware-autonomous):
+        1. Readout (10ns) — syndrome acquisition from measurement unit
+        2. Multicast (10ns) — distribute via hardware multicast
+        3. Reduce (4ns) — combinational XOR across all nodes
+        4. Decode (8ns) — BRAM LUT lookup
+        5. Trigger (2ns) — hardware register write
+        Total: 34ns (within 50ns budget)
+    """
+
+    # Phase timing model (nanoseconds)
+    PHASE_READOUT_NS = 10.0
+    PHASE_MULTICAST_NS = ULL_TARGET_MULTICAST_NS
+    PHASE_REDUCE_NS = ULL_TARGET_REDUCE_NS
+    PHASE_DECODE_NS = ULL_TARGET_DECODE_NS
+    PHASE_TRIGGER_NS = ULL_TARGET_TRIGGER_NS
+
+    def __init__(self, config: Optional[ULLPipelineConfig] = None):
+        self._config = config or ULLPipelineConfig()
+        self._hw_accel = None  # Lazy-initialized
+        self._programmed = False
+        self._armed = False
+        self._execution_count = 0
+        self._total_latency_ns = 0.0
+        self._violations = 0
+        self._results: deque = deque(maxlen=1000)
+
+    def program_pipeline(self,
+                         decoder_fn: Callable[[np.ndarray], np.ndarray],
+                         syndrome_bits: int = 0,
+                         trigger_map: Optional[Dict[int, str]] = None) -> int:
+        """
+        Program the FPGA pipeline for autonomous operation.
+
+        Args:
+            decoder_fn: Syndrome → correction mapping function
+            syndrome_bits: Number of syndrome bits (0 = use config default)
+            trigger_map: Optional mapping of correction → trigger action
+
+        Returns:
+            Number of LUT entries programmed
+        """
+        from .hardware_accel import HardwareAccelerator
+
+        if syndrome_bits > 0:
+            self._config.max_syndrome_bits = syndrome_bits
+
+        self._hw_accel = HardwareAccelerator(self._config)
+        entries = self._hw_accel.program_pipeline(decoder_fn)
+        self._programmed = True
+        self._armed = True
+        return entries
+
+    def run_autonomous_cycle(self,
+                             syndrome: Optional[np.ndarray] = None
+                             ) -> ULLFeedbackResult:
+        """
+        Model one hardware-autonomous feedback cycle.
+
+        In real hardware, this happens entirely in the FPGA. This method
+        models the cycle with accurate timing for simulation/testing.
+
+        Args:
+            syndrome: Optional syndrome data (None = simulated readout)
+
+        Returns:
+            ULLFeedbackResult with phase timing breakdown
+        """
+        if not self._programmed:
+            return ULLFeedbackResult(
+                success=False,
+                total_latency_ns=0,
+                phases={},
+                execution_id=self._execution_count,
+            )
+
+        self._execution_count += 1
+
+        phases = {
+            'readout': self.PHASE_READOUT_NS,
+            'multicast': self.PHASE_MULTICAST_NS,
+            'reduce': self.PHASE_REDUCE_NS,
+            'decode': self.PHASE_DECODE_NS,
+            'trigger': self.PHASE_TRIGGER_NS,
+        }
+
+        total = sum(phases.values())
+
+        # Simulate LUT lookup if syndrome provided
+        correction = None
+        if syndrome is not None and self._hw_accel:
+            correction = self._hw_accel.decoder.lookup(syndrome)
+
+        result = ULLFeedbackResult(
+            success=True,
+            total_latency_ns=total,
+            phases=phases,
+            execution_id=self._execution_count,
+            syndrome=syndrome,
+            correction=correction,
+        )
+
+        self._total_latency_ns += total
+        if not result.within_budget:
+            self._violations += 1
+        self._results.append(result)
+
+        return result
+
+    def run_continuous(self, num_cycles: int) -> List[ULLFeedbackResult]:
+        """
+        Run multiple autonomous cycles with pipeline overlap modeling.
+
+        After the first cycle fills the pipeline, subsequent cycles complete
+        at the rate of the slowest stage (multicast = 10ns).
+
+        Args:
+            num_cycles: Number of cycles to run
+
+        Returns:
+            List of ULLFeedbackResult for each cycle
+        """
+        results = []
+        for i in range(num_cycles):
+            result = self.run_autonomous_cycle()
+            # Pipeline overlap: after first cycle, throughput is limited by
+            # the slowest stage. Model this as slightly reduced total for
+            # subsequent cycles.
+            if i > 0:
+                # Pipeline overlap reduces effective latency by ~10%
+                result.total_latency_ns *= 0.9
+                result.within_budget = result.total_latency_ns <= ULL_TARGET_TOTAL_NS
+            results.append(result)
+        return results
+
+    def disarm(self) -> None:
+        """Disarm the hardware pipeline."""
+        if self._hw_accel:
+            self._hw_accel.disarm()
+        self._armed = False
+
+    def update_decoder(self, decoder_fn: Callable[[np.ndarray], np.ndarray]) -> int:
+        """
+        Update the decoder LUT without full reprogramming.
+
+        Args:
+            decoder_fn: New syndrome → correction mapping
+
+        Returns:
+            Number of entries programmed
+        """
+        if not self._hw_accel:
+            raise RuntimeError("Pipeline not programmed")
+        return self._hw_accel.decoder.program(decoder_fn)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get execution statistics."""
+        return {
+            'execution_count': self._execution_count,
+            'total_latency_ns': self._total_latency_ns,
+            'mean_latency_ns': (
+                self._total_latency_ns / self._execution_count
+                if self._execution_count > 0 else 0
+            ),
+            'violations': self._violations,
+            'violation_rate': (
+                self._violations / self._execution_count
+                if self._execution_count > 0 else 0
+            ),
+            'armed': self._armed,
+            'programmed': self._programmed,
+            'budget_ns': ULL_TARGET_TOTAL_NS,
+        }
+
+    @property
+    def is_armed(self) -> bool:
+        return self._armed
+
+    @property
+    def is_programmed(self) -> bool:
+        return self._programmed
