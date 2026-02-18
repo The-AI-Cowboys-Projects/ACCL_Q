@@ -345,7 +345,9 @@ class BoardDiscovery:
             version = data[0]
             board_type_id = data[1]
             hostname_len = data[2]
-            hostname = data[3:3+hostname_len].decode('utf-8')
+            if hostname_len > len(data) - 3:
+                return None
+            hostname = data[3:3+hostname_len].decode('utf-8', errors='replace')
 
             # Map board type ID to enum
             board_type_map = {
@@ -384,16 +386,17 @@ class BoardDiscovery:
         """
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2.0)
-            sock.connect((ip_address, port))
+            try:
+                sock.settimeout(2.0)
+                sock.connect((ip_address, port))
 
-            # Send probe request
-            sock.send(b"ACCLQ_PROBE\x01")
+                # Send probe request
+                sock.send(b"ACCLQ_PROBE\x01")
 
-            # Receive response
-            response = sock.recv(4096)
-
-            sock.close()
+                # Receive response
+                response = sock.recv(4096)
+            finally:
+                sock.close()
 
             # Parse probe response (JSON format)
             if response:
@@ -648,35 +651,37 @@ class DeploymentManager:
         """Configure a single board."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            sock.connect((board.ip_address, board.management_port))
+            try:
+                sock.settimeout(5.0)
+                sock.connect((board.ip_address, board.management_port))
 
-            # Build configuration message
-            config_data = {
-                'command': 'configure',
-                'rank': board.rank,
-                'num_ranks': self.config.num_boards,
-                'mode': self.config.mode.value,
-                'sync_mode': self.config.sync_mode.value,
-                'master_rank': self.config.master_rank,
-                'clock_master_rank': self.config.clock_master_rank,
-                'timeout_us': self.config.global_timeout_us,
-            }
+                # Build configuration message
+                config_data = {
+                    'command': 'configure',
+                    'rank': board.rank,
+                    'num_ranks': self.config.num_boards,
+                    'mode': self.config.mode.value,
+                    'sync_mode': self.config.sync_mode.value,
+                    'master_rank': self.config.master_rank,
+                    'clock_master_rank': self.config.clock_master_rank,
+                    'timeout_us': self.config.global_timeout_us,
+                }
 
-            # Add link configuration for this board
-            board_links = [
-                {'port': l.source_port, 'dest_rank': l.dest_rank}
-                for l in self.config.links
-                if l.source_rank == board.rank
-            ]
-            config_data['links'] = board_links
+                # Add link configuration for this board
+                board_links = [
+                    {'port': l.source_port, 'dest_rank': l.dest_rank}
+                    for l in self.config.links
+                    if l.source_rank == board.rank
+                ]
+                config_data['links'] = board_links
 
-            # Send configuration
-            sock.send(json.dumps(config_data).encode('utf-8'))
+                # Send configuration
+                sock.send(json.dumps(config_data).encode('utf-8'))
 
-            # Wait for acknowledgment
-            response = sock.recv(1024)
-            sock.close()
+                # Wait for acknowledgment
+                response = sock.recv(1024)
+            finally:
+                sock.close()
 
             return response == b"OK"
 
@@ -707,19 +712,21 @@ class DeploymentManager:
         """Load bitstream to a single board."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(60.0)  # Bitstream load can take time
-            sock.connect((board.ip_address, board.management_port))
+            try:
+                sock.settimeout(60.0)  # Bitstream load can take time
+                sock.connect((board.ip_address, board.management_port))
 
-            # Send load command
-            command = {
-                'command': 'load_bitstream',
-                'path': board.fpga_bitstream or self.config.bitstream_path,
-            }
-            sock.send(json.dumps(command).encode('utf-8'))
+                # Send load command
+                command = {
+                    'command': 'load_bitstream',
+                    'path': board.fpga_bitstream or self.config.bitstream_path,
+                }
+                sock.send(json.dumps(command).encode('utf-8'))
 
-            # Wait for completion
-            response = sock.recv(1024)
-            sock.close()
+                # Wait for completion
+                response = sock.recv(1024)
+            finally:
+                sock.close()
 
             return response == b"OK"
 
@@ -772,17 +779,19 @@ class DeploymentManager:
         """Initialize clock master board."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5.0)
-            sock.connect((board.ip_address, board.management_port))
+            try:
+                sock.settimeout(5.0)
+                sock.connect((board.ip_address, board.management_port))
 
-            command = {
-                'command': 'init_clock_master',
-                'reference_freq_mhz': board.reference_freq_mhz,
-            }
-            sock.send(json.dumps(command).encode('utf-8'))
+                command = {
+                    'command': 'init_clock_master',
+                    'reference_freq_mhz': board.reference_freq_mhz,
+                }
+                sock.send(json.dumps(command).encode('utf-8'))
 
-            response = sock.recv(1024)
-            sock.close()
+                response = sock.recv(1024)
+            finally:
+                sock.close()
 
             return response == b"OK"
 
@@ -794,18 +803,20 @@ class DeploymentManager:
         """Synchronize a slave board's clock."""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            sock.connect((board.ip_address, board.management_port))
+            try:
+                sock.settimeout(10.0)
+                sock.connect((board.ip_address, board.management_port))
 
-            command = {
-                'command': 'sync_clock',
-                'master_rank': self.config.clock_master_rank,
-                'master_ip': self.config.boards[self.config.clock_master_rank].ip_address,
-            }
-            sock.send(json.dumps(command).encode('utf-8'))
+                command = {
+                    'command': 'sync_clock',
+                    'master_rank': self.config.clock_master_rank,
+                    'master_ip': self.config.boards[self.config.clock_master_rank].ip_address,
+                }
+                sock.send(json.dumps(command).encode('utf-8'))
 
-            response = sock.recv(1024)
-            sock.close()
+                response = sock.recv(1024)
+            finally:
+                sock.close()
 
             return response == b"OK"
 
@@ -820,14 +831,16 @@ class DeploymentManager:
         for rank, board in self.config.boards.items():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(5.0)
-                sock.connect((board.ip_address, board.management_port))
+                try:
+                    sock.settimeout(5.0)
+                    sock.connect((board.ip_address, board.management_port))
 
-                command = {'command': 'get_sync_error'}
-                sock.send(json.dumps(command).encode('utf-8'))
+                    command = {'command': 'get_sync_error'}
+                    sock.send(json.dumps(command).encode('utf-8'))
 
-                response = sock.recv(1024)
-                sock.close()
+                    response = sock.recv(1024)
+                finally:
+                    sock.close()
 
                 data = json.loads(response.decode('utf-8'))
                 error = abs(data.get('phase_error_ns', 0.0))
@@ -895,11 +908,13 @@ class DeploymentManager:
             for rank, board in self.config.boards.items():
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.settimeout(1.0)
-                    sock.connect((board.ip_address, board.management_port))
-                    sock.send(b'{"command": "heartbeat"}')
-                    response = sock.recv(64)
-                    sock.close()
+                    try:
+                        sock.settimeout(1.0)
+                        sock.connect((board.ip_address, board.management_port))
+                        sock.send(b'{"command": "heartbeat"}')
+                        response = sock.recv(64)
+                    finally:
+                        sock.close()
 
                     if response == b"OK":
                         board.is_online = True
@@ -924,10 +939,12 @@ class DeploymentManager:
         for rank, board in self.config.boards.items():
             try:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2.0)
-                sock.connect((board.ip_address, board.management_port))
-                sock.send(b'{"command": "shutdown"}')
-                sock.close()
+                try:
+                    sock.settimeout(2.0)
+                    sock.connect((board.ip_address, board.management_port))
+                    sock.send(b'{"command": "shutdown"}')
+                finally:
+                    sock.close()
             except Exception:
                 pass
 

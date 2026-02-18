@@ -9,7 +9,7 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from enum import Enum
-from collections import defaultdict
+from collections import defaultdict, deque
 import time
 import json
 import threading
@@ -139,8 +139,8 @@ class CriticalPathProfiler:
     """
 
     def __init__(self):
-        self._samples: List[ProfileSample] = []
-        self._active_spans: Dict[str, int] = {}  # operation -> start time
+        self._samples: deque = deque(maxlen=10000)
+        self._active_spans: Dict[str, Tuple[int, str]] = {}  # op_id -> (start_time, operation)
         self._lock = threading.Lock()
 
         # Phase definitions for each operation
@@ -152,6 +152,9 @@ class CriticalPathProfiler:
             'scatter': ['serialize', 'route', 'deserialize'],
             'gather': ['serialize', 'route', 'deserialize'],
             'feedback': ['measure', 'communicate', 'decode', 'apply'],
+            'ull_feedback': ['readout', 'multicast', 'reduce', 'decode', 'trigger'],
+            'ull_broadcast': ['multicast'],
+            'ull_reduce': ['combinational_xor'],
         }
 
     def start_operation(self, operation: str, metadata: Optional[Dict] = None) -> str:
@@ -167,7 +170,7 @@ class CriticalPathProfiler:
         """
         op_id = f"{operation}_{time.perf_counter_ns()}"
         with self._lock:
-            self._active_spans[op_id] = time.perf_counter_ns()
+            self._active_spans[op_id] = (time.perf_counter_ns(), operation)
         return op_id
 
     def end_operation(self, op_id: str) -> Optional[float]:
@@ -184,9 +187,8 @@ class CriticalPathProfiler:
         with self._lock:
             if op_id not in self._active_spans:
                 return None
-            start_time = self._active_spans.pop(op_id)
+            start_time, operation = self._active_spans.pop(op_id)
             duration = end_time - start_time
-            operation = op_id.rsplit('_', 1)[0]
 
             self._samples.append(ProfileSample(
                 timestamp_ns=start_time,

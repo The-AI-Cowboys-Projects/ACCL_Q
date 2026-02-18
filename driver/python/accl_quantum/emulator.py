@@ -7,7 +7,7 @@ for thorough validation testing of quantum control operations.
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Callable
+from typing import Dict, List, Optional, Tuple
 from enum import Enum
 import time
 import threading
@@ -711,8 +711,8 @@ class QuantumCircuitValidator:
         self.emulator = emulator
         self.feedback_budget_ns = feedback_budget_ns
 
-        # Validation results
-        self._results: List[dict] = []
+        # Validation results (capped to prevent OOM)
+        self._results: deque = deque(maxlen=10000)
 
     def validate_feedback_timing(self, source_qubit: int, target_qubit: int,
                                  feedback_latency_ns: float) -> dict:

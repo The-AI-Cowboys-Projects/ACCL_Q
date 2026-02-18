@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 
 from .driver import ACCLQuantum, OperationResult
 from .constants import (
+    ACCLMode,
     ReduceOp,
     SyncMode,
     QuantumMsgType,
@@ -165,6 +166,27 @@ class QubiCIntegration(QuantumControlIntegration):
         else:
             raise RuntimeError(f"Syndrome aggregation failed: {op_result.status}")
 
+    def aggregate_syndrome_ull(self, local_syndrome: np.ndarray) -> np.ndarray:
+        """
+        ULL-aware syndrome aggregation.
+
+        Uses zero-copy allreduce when in ULTRA_LOW_LATENCY mode,
+        falls back to standard path otherwise.
+
+        Args:
+            local_syndrome: Local syndrome bits
+
+        Returns:
+            Global syndrome (XOR of all local syndromes)
+        """
+        if self.accl._mode == ACCLMode.ULTRA_LOW_LATENCY:
+            # Zero-copy path: skip pack/unpack, direct allreduce
+            op_result = self.accl.allreduce(local_syndrome, op=ReduceOp.XOR)
+            if op_result.success:
+                return op_result.data
+            raise RuntimeError(f"ULL syndrome aggregation failed: {op_result.status}")
+        return self.aggregate_syndrome(local_syndrome)
+
     def conditional_pulse(self, condition_qubit: int,
                           pulse_params: Dict[str, Any]) -> bool:
         """
@@ -293,8 +315,8 @@ class QubiCIntegration(QuantumControlIntegration):
 
     def _get_qubit_rank(self, qubit_index: int) -> int:
         """Determine which rank controls a qubit."""
-        qubits_per_rank = self.config.num_qubits // self.accl.num_ranks
-        return qubit_index // qubits_per_rank
+        qubits_per_rank = max(1, self.config.num_qubits // self.accl.num_ranks)
+        return min(qubit_index // qubits_per_rank, self.accl.num_ranks - 1)
 
     def _compute_syndrome(self, measurements: np.ndarray) -> np.ndarray:
         """Compute error syndrome from measurements."""
@@ -362,6 +384,9 @@ class QICKIntegration(QuantumControlIntegration):
         """
         super().__init__(accl)
         self.config = config or QICKConfig()
+
+        # Per-instance RNG (avoids shared global state)
+        self._rng = np.random.default_rng()
 
         # QICK-specific state
         self._tproc_counter_offset = 0
@@ -502,7 +527,7 @@ class QICKIntegration(QuantumControlIntegration):
 
         # In hardware: trigger acquisition
         # local_data = self._acquire(channels, duration_cycles)
-        local_data = np.random.randn(len(channels), duration_cycles)
+        local_data = self._rng.standard_normal((len(channels), duration_cycles))
 
         # Gather all data to root
         result = self.accl.gather(local_data, root=0)
@@ -603,6 +628,7 @@ class UnifiedQuantumControl:
 
         self.accl = accl
         self.backend_type = backend
+        self._rng = np.random.default_rng()
 
         if backend == 'qubic':
             # Get valid field names for QubiCConfig
@@ -636,7 +662,7 @@ class UnifiedQuantumControl:
             Measurement outcomes (available at all ranks)
         """
         # In real implementation: trigger measurement hardware
-        local_results = np.random.randint(0, 2, len(qubits))
+        local_results = self._rng.integers(0, 2, len(qubits))
 
         # Distribute via ACCL
         return self.backend.distribute_measurement(
@@ -656,7 +682,7 @@ class UnifiedQuantumControl:
             Corrected data qubit states
         """
         # Measure ancillas
-        ancilla_results = np.random.randint(0, 2, len(ancilla_qubits))
+        ancilla_results = self._rng.integers(0, 2, len(ancilla_qubits))
 
         # Compute local syndrome
         local_syndrome = ancilla_results  # Simplified

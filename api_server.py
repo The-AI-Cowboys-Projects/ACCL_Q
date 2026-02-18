@@ -5,8 +5,11 @@ ACCL-Q REST API Server for IBM Cloud Code Engine
 Provides HTTP endpoints for quantum collective operations simulation.
 """
 
+import asyncio
 import os
 import time
+import uuid
+
 import numpy as np
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -31,9 +34,26 @@ from accl_quantum.emulator import (
 )
 from accl_quantum.feedback import MeasurementFeedbackPipeline, FeedbackConfig
 
+# Constants
+MAX_EMULATORS = 50
+
+OP_MAP = {
+    "xor": ReduceOp.XOR,
+    "add": ReduceOp.ADD,
+    "max": ReduceOp.MAX,
+    "min": ReduceOp.MIN,
+}
+
+MODE_MAP = {
+    "standard": ACCLMode.STANDARD,
+    "deterministic": ACCLMode.DETERMINISTIC,
+    "low_latency": ACCLMode.LOW_LATENCY,
+}
+
 # Global instances
 _accl_instances: Dict[int, ACCLQuantum] = {}
 _emulators: Dict[str, RealisticQubitEmulator] = {}
+_state_lock = asyncio.Lock()
 
 
 # Request/Response models
@@ -43,18 +63,18 @@ class CreateClusterRequest(BaseModel):
 
 
 class BroadcastRequest(BaseModel):
-    data: List[int] = Field(..., description="Data to broadcast (uint8 values)")
+    data: List[int] = Field(..., max_length=4096, description="Data to broadcast (uint8 values)")
     root: int = Field(default=0, ge=0, description="Root rank")
 
 
 class ReduceRequest(BaseModel):
-    data: List[int] = Field(..., description="Local data (uint8 values)")
+    data: List[int] = Field(..., max_length=4096, description="Local data (uint8 values)")
     operation: str = Field(default="xor", description="Reduce operation: xor, add, max, min")
     root: int = Field(default=0, ge=0, description="Root rank")
 
 
 class AllreduceRequest(BaseModel):
-    data: List[int] = Field(..., description="Local data (uint8 values)")
+    data: List[int] = Field(..., max_length=4096, description="Local data (uint8 values)")
     operation: str = Field(default="xor", description="Reduce operation: xor, add, max, min")
 
 
@@ -104,7 +124,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -142,21 +162,21 @@ async def root():
 @app.post("/cluster")
 async def create_cluster(request: CreateClusterRequest):
     """Create an ACCL cluster with specified ranks."""
-    mode_map = {
-        "standard": ACCLMode.STANDARD,
-        "deterministic": ACCLMode.DETERMINISTIC,
-        "low_latency": ACCLMode.LOW_LATENCY,
-    }
+    mode = MODE_MAP.get(request.mode)
+    if mode is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown mode: {request.mode}. Valid: {', '.join(MODE_MAP)}"
+        )
 
-    mode = mode_map.get(request.mode, ACCLMode.DETERMINISTIC)
-
-    # Create instances for each rank
-    _accl_instances.clear()
-    for rank in range(request.num_ranks):
-        accl = ACCLQuantum(num_ranks=request.num_ranks, local_rank=rank)
-        accl.configure(mode=mode, sync_mode=SyncMode.HARDWARE)
-        accl.sync_clocks()
-        _accl_instances[rank] = accl
+    async with _state_lock:
+        # Create instances for each rank
+        _accl_instances.clear()
+        for rank in range(request.num_ranks):
+            accl = ACCLQuantum(num_ranks=request.num_ranks, local_rank=rank)
+            accl.configure(mode=mode, sync_mode=SyncMode.HARDWARE)
+            accl.sync_clocks()
+            _accl_instances[rank] = accl
 
     return {
         "success": True,
@@ -183,17 +203,20 @@ async def get_cluster_status():
 @app.post("/collective/broadcast", response_model=OperationResult)
 async def broadcast(request: BroadcastRequest):
     """Execute broadcast operation."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized. POST /cluster first.")
 
-    if request.root >= len(_accl_instances):
+    if request.root >= len(instances):
         raise HTTPException(status_code=400, detail=f"Root rank {request.root} exceeds cluster size")
 
     data = np.array(request.data, dtype=np.uint8)
 
     # Execute on all ranks
     results = []
-    for rank, accl in _accl_instances.items():
+    for rank, accl in instances.items():
         result = accl.broadcast(data, root=request.root)
         results.append(result)
 
@@ -201,28 +224,33 @@ async def broadcast(request: BroadcastRequest):
         success=all(r.success for r in results),
         data=results[0].data.tolist() if results[0].data is not None else None,
         latency_ns=results[0].latency_ns,
-        message=f"Broadcast from rank {request.root} to {len(_accl_instances)} ranks"
+        message=f"Broadcast from rank {request.root} to {len(instances)} ranks"
     )
 
 
 @app.post("/collective/reduce", response_model=OperationResult)
 async def reduce(request: ReduceRequest):
     """Execute reduce operation."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized")
 
-    op_map = {
-        "xor": ReduceOp.XOR,
-        "add": ReduceOp.ADD,
-        "max": ReduceOp.MAX,
-        "min": ReduceOp.MIN,
-    }
-    op = op_map.get(request.operation, ReduceOp.XOR)
+    if request.root >= len(instances):
+        raise HTTPException(status_code=400, detail=f"Root rank {request.root} exceeds cluster size")
+
+    op = OP_MAP.get(request.operation)
+    if op is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown operation: {request.operation}. Valid: {', '.join(OP_MAP)}"
+        )
 
     data = np.array(request.data, dtype=np.uint8)
 
     # Execute on root rank
-    accl = _accl_instances[request.root]
+    accl = instances[request.root]
     result = accl.reduce(data, op=op, root=request.root)
 
     return OperationResult(
@@ -236,39 +264,44 @@ async def reduce(request: ReduceRequest):
 @app.post("/collective/allreduce", response_model=OperationResult)
 async def allreduce(request: AllreduceRequest):
     """Execute allreduce operation."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized")
 
-    op_map = {
-        "xor": ReduceOp.XOR,
-        "add": ReduceOp.ADD,
-        "max": ReduceOp.MAX,
-        "min": ReduceOp.MIN,
-    }
-    op = op_map.get(request.operation, ReduceOp.XOR)
+    op = OP_MAP.get(request.operation)
+    if op is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown operation: {request.operation}. Valid: {', '.join(OP_MAP)}"
+        )
 
     data = np.array(request.data, dtype=np.uint8)
 
     # Execute on rank 0
-    accl = _accl_instances[0]
+    accl = instances[0]
     result = accl.allreduce(data, op=op)
 
     return OperationResult(
         success=result.success,
         data=result.data.tolist() if result.data is not None else None,
         latency_ns=result.latency_ns,
-        message=f"Allreduce ({request.operation}) across {len(_accl_instances)} ranks"
+        message=f"Allreduce ({request.operation}) across {len(instances)} ranks"
     )
 
 
 @app.post("/collective/barrier", response_model=OperationResult)
 async def barrier():
     """Execute barrier synchronization."""
-    if not _accl_instances:
+    async with _state_lock:
+        instances = dict(_accl_instances)
+
+    if not instances:
         raise HTTPException(status_code=400, detail="Cluster not initialized")
 
     results = []
-    for accl in _accl_instances.values():
+    for accl in instances.values():
         result = accl.barrier()
         results.append(result)
 
@@ -277,7 +310,7 @@ async def barrier():
     return OperationResult(
         success=all(r.success for r in results),
         latency_ns=sum(latencies) / len(latencies),
-        message=f"Barrier synchronized {len(_accl_instances)} ranks, jitter: {max(latencies) - min(latencies):.1f}ns"
+        message=f"Barrier synchronized {len(instances)} ranks, jitter: {max(latencies) - min(latencies):.1f}ns"
     )
 
 
@@ -285,18 +318,20 @@ async def barrier():
 @app.post("/qec/syndrome")
 async def qec_syndrome(request: QECRequest):
     """Run QEC syndrome aggregation demo."""
-    # Create cluster
-    for rank in range(request.num_ranks):
-        accl = ACCLQuantum(num_ranks=request.num_ranks, local_rank=rank)
-        accl.configure(mode=ACCLMode.DETERMINISTIC)
-        accl.sync_clocks()
-        _accl_instances[rank] = accl
+    async with _state_lock:
+        # Clear previous state before creating new cluster
+        _accl_instances.clear()
+        for rank in range(request.num_ranks):
+            accl = ACCLQuantum(num_ranks=request.num_ranks, local_rank=rank)
+            accl.configure(mode=ACCLMode.DETERMINISTIC)
+            accl.sync_clocks()
+            _accl_instances[rank] = accl
 
-    # Generate random syndromes
-    np.random.seed(int(time.time()) % 1000)
+    # Generate random syndromes with per-call RNG (no shared seed)
+    rng = np.random.default_rng()
     local_syndromes = []
     for rank in range(request.num_ranks):
-        syndrome = np.random.randint(0, 2, size=request.syndrome_bits, dtype=np.uint8)
+        syndrome = rng.integers(0, 2, size=request.syndrome_bits, dtype=np.uint8)
         local_syndromes.append(syndrome.tolist())
 
     # Aggregate via XOR
@@ -326,17 +361,22 @@ async def qec_syndrome(request: QECRequest):
 @app.post("/emulator")
 async def create_emulator(request: EmulatorRequest):
     """Create a qubit emulator instance."""
-    import uuid
+    async with _state_lock:
+        if len(_emulators) >= MAX_EMULATORS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Emulator limit reached ({MAX_EMULATORS}). Delete unused emulators first."
+            )
 
-    noise = NoiseParameters(
-        t1_us=request.t1_us,
-        t2_us=request.t2_us,
-        single_qubit_gate_error=request.gate_error,
-    )
+        noise = NoiseParameters(
+            t1_us=request.t1_us,
+            t2_us=request.t2_us,
+            single_qubit_gate_error=request.gate_error,
+        )
 
-    emulator_id = str(uuid.uuid4())[:8]
-    emulator = RealisticQubitEmulator(num_qubits=request.num_qubits, noise_params=noise)
-    _emulators[emulator_id] = emulator
+        emulator_id = str(uuid.uuid4())
+        emulator = RealisticQubitEmulator(num_qubits=request.num_qubits, noise_params=noise)
+        _emulators[emulator_id] = emulator
 
     return {
         "emulator_id": emulator_id,
@@ -352,10 +392,22 @@ async def create_emulator(request: EmulatorRequest):
 @app.post("/emulator/{emulator_id}/gate")
 async def apply_gate(emulator_id: str, request: GateRequest):
     """Apply a quantum gate."""
-    if emulator_id not in _emulators:
+    async with _state_lock:
+        emulator = _emulators.get(emulator_id)
+    if emulator is None:
         raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
 
-    emulator = _emulators[emulator_id]
+    # Validate qubit indices against emulator size
+    if request.qubit >= emulator.num_qubits:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Qubit {request.qubit} out of range (emulator has {emulator.num_qubits} qubits)"
+        )
+    if request.target is not None and request.target >= emulator.num_qubits:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Target qubit {request.target} out of range (emulator has {emulator.num_qubits} qubits)"
+        )
 
     gate_map = {
         "H": GateType.H,
@@ -396,14 +448,20 @@ async def apply_gate(emulator_id: str, request: GateRequest):
 @app.post("/emulator/{emulator_id}/measure")
 async def measure_qubits(emulator_id: str, qubits: Optional[List[int]] = None):
     """Measure qubits."""
-    if emulator_id not in _emulators:
+    async with _state_lock:
+        emulator = _emulators.get(emulator_id)
+    if emulator is None:
         raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
-
-    emulator = _emulators[emulator_id]
 
     if qubits is None:
         results = emulator.measure_all()
     else:
+        for q in qubits:
+            if q < 0 or q >= emulator.num_qubits:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Qubit index {q} out of range [0, {emulator.num_qubits})"
+                )
         results = [emulator.measure(q) for q in qubits]
 
     return {
@@ -416,10 +474,10 @@ async def measure_qubits(emulator_id: str, qubits: Optional[List[int]] = None):
 @app.get("/emulator/{emulator_id}")
 async def get_emulator_state(emulator_id: str):
     """Get emulator state."""
-    if emulator_id not in _emulators:
+    async with _state_lock:
+        emulator = _emulators.get(emulator_id)
+    if emulator is None:
         raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
-
-    emulator = _emulators[emulator_id]
     stats = emulator.get_statistics()
 
     states = {}
@@ -442,10 +500,11 @@ async def get_emulator_state(emulator_id: str):
 @app.delete("/emulator/{emulator_id}")
 async def delete_emulator(emulator_id: str):
     """Delete emulator instance."""
-    if emulator_id not in _emulators:
-        raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
+    async with _state_lock:
+        if emulator_id not in _emulators:
+            raise HTTPException(status_code=404, detail=f"Emulator {emulator_id} not found")
 
-    del _emulators[emulator_id]
+        del _emulators[emulator_id]
     return {"success": True, "message": f"Emulator {emulator_id} deleted"}
 
 
