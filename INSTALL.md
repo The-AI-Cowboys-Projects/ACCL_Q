@@ -1,12 +1,42 @@
-# Installation instructions
+# Installation Instructions
 
-## Pull project
+## ACCL-Q Python Driver (Quick Start)
+
+```sh
+git clone https://github.com/The-AI-Cowboys-Projects/ACCL_NEW.git
+cd ACCL_NEW
+
+# Install Python dependencies
+pip install -r requirements.txt
+
+# Run the demo
+python demo_accl_q.py
+
+# Run the test suite
+python -m pytest test/quantum/ -v
+
+# Start the API server
+python -m uvicorn api_server:app --host 0.0.0.0 --port 8080
+```
+
+### Requirements
+
+- Python 3.11+
+- numpy >= 1.24
+- fastapi, uvicorn, pydantic (for API server)
+- pytest, pytest-asyncio, httpx (for tests)
+
+---
+
+## ACCL Hardware Build (Original)
+
+### Pull project
 ```sh
 git clone https://github.com/Xilinx/ACCL.git
 git submodule update --init --recursive
 ```
 
-## Install dependencies
+### Install dependencies
 The project has been tested with Xilinx Vitis 2022.1 on Ubuntu 20.04.
 ```sh
 sudo apt update

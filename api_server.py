@@ -32,7 +32,9 @@ from accl_quantum.emulator import (
     NoiseParameters,
     GateType,
 )
-from accl_quantum.feedback import MeasurementFeedbackPipeline, FeedbackConfig
+from accl_quantum.feedback import MeasurementFeedbackPipeline, FeedbackConfig, HardwareFeedbackEngine
+from accl_quantum.hardware_accel import HardwareAccelerator
+from accl_quantum.constants import ULLPipelineConfig, ULL_TARGET_TOTAL_NS
 
 # Constants
 MAX_EMULATORS = 50
@@ -48,6 +50,7 @@ MODE_MAP = {
     "standard": ACCLMode.STANDARD,
     "deterministic": ACCLMode.DETERMINISTIC,
     "low_latency": ACCLMode.LOW_LATENCY,
+    "ultra_low_latency": ACCLMode.ULTRA_LOW_LATENCY,
 }
 
 # Global instances
@@ -59,7 +62,7 @@ _state_lock = asyncio.Lock()
 # Request/Response models
 class CreateClusterRequest(BaseModel):
     num_ranks: int = Field(default=4, ge=2, le=16, description="Number of FPGA ranks to simulate")
-    mode: str = Field(default="deterministic", description="Operation mode: standard, deterministic, low_latency")
+    mode: str = Field(default="deterministic", description="Operation mode: standard, deterministic, low_latency, ultra_low_latency")
 
 
 class BroadcastRequest(BaseModel):
@@ -116,8 +119,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="ACCL-Q API",
-    description="Quantum Collective Communication Emulator API",
-    version="0.2.0",
+    description="Quantum Collective Communication Emulator API with Ultra-Low-Latency support",
+    version="0.3.0",
     lifespan=lifespan
 )
 
@@ -142,7 +145,7 @@ async def root():
     """API info."""
     return {
         "service": "ACCL-Q Quantum Emulator",
-        "version": "0.2.0",
+        "version": "0.3.0",
         "endpoints": {
             "/health": "Health check",
             "/cluster": "Create/manage ACCL cluster",
@@ -151,6 +154,8 @@ async def root():
             "/collective/allreduce": "Allreduce operation",
             "/collective/barrier": "Barrier synchronization",
             "/qec/syndrome": "QEC syndrome aggregation demo",
+            "/ull/status": "ULL pipeline status",
+            "/ull/feedback": "Run ULL autonomous feedback cycle",
             "/emulator": "Create qubit emulator",
             "/emulator/{id}/gate": "Apply quantum gate",
             "/emulator/{id}/measure": "Measure qubits",
@@ -506,6 +511,104 @@ async def delete_emulator(emulator_id: str):
 
         del _emulators[emulator_id]
     return {"success": True, "message": f"Emulator {emulator_id} deleted"}
+
+
+# ULL Pipeline Endpoints
+_ull_engine: Optional[HardwareFeedbackEngine] = None
+
+
+class ULLConfigRequest(BaseModel):
+    syndrome_bits: int = Field(default=16, ge=1, le=512)
+    coherence_time_us: float = Field(default=50.0, gt=0)
+    fiber_length_m: float = Field(default=1.0, ge=0)
+
+
+@app.get("/ull/status")
+async def ull_status():
+    """Get ULL pipeline status."""
+    if _ull_engine is None:
+        return {
+            "initialized": False,
+            "message": "ULL engine not initialized. POST /ull/configure first."
+        }
+
+    stats = _ull_engine.get_stats()
+    return {
+        "initialized": True,
+        "armed": _ull_engine._armed,
+        "stats": stats,
+        "latency_budget_ns": ULL_TARGET_TOTAL_NS,
+    }
+
+
+@app.post("/ull/configure")
+async def ull_configure(request: ULLConfigRequest):
+    """Configure and arm the ULL hardware feedback pipeline."""
+    global _ull_engine
+
+    config = ULLPipelineConfig(
+        max_syndrome_bits=request.syndrome_bits,
+        coherence_time_us=request.coherence_time_us,
+        fiber_length_m=request.fiber_length_m,
+    )
+
+    _ull_engine = HardwareFeedbackEngine(config)
+
+    def simple_decoder(syndrome):
+        return syndrome
+
+    entries = _ull_engine.program_pipeline(
+        decoder_fn=simple_decoder,
+        syndrome_bits=request.syndrome_bits,
+    )
+
+    return {
+        "success": True,
+        "lut_entries": entries,
+        "estimated_latency_ns": _ull_engine._hw_accel.estimate_latency_ns(),
+        "message": f"ULL pipeline armed with {entries} LUT entries"
+    }
+
+
+@app.post("/ull/feedback")
+async def ull_feedback(num_cycles: int = 1):
+    """Run ULL autonomous feedback cycle(s)."""
+    if _ull_engine is None:
+        raise HTTPException(
+            status_code=400,
+            detail="ULL engine not initialized. POST /ull/configure first."
+        )
+
+    if num_cycles == 1:
+        result = _ull_engine.run_autonomous_cycle()
+        return {
+            "success": result.success,
+            "total_latency_ns": result.total_latency_ns,
+            "within_budget": result.within_budget,
+            "phases": result.phases,
+        }
+    else:
+        results = _ull_engine.run_continuous(num_cycles=min(num_cycles, 1000))
+        violations = sum(1 for r in results if not r.within_budget)
+        latencies = [r.total_latency_ns for r in results]
+        return {
+            "success": all(r.success for r in results),
+            "num_cycles": len(results),
+            "violations": violations,
+            "mean_latency_ns": float(np.mean(latencies)),
+            "max_latency_ns": float(np.max(latencies)),
+            "min_latency_ns": float(np.min(latencies)),
+        }
+
+
+@app.post("/ull/disarm")
+async def ull_disarm():
+    """Disarm the ULL pipeline."""
+    global _ull_engine
+    if _ull_engine is None:
+        raise HTTPException(status_code=400, detail="ULL engine not initialized")
+    _ull_engine.disarm()
+    return {"success": True, "message": "ULL pipeline disarmed"}
 
 
 if __name__ == "__main__":

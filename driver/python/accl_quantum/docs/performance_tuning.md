@@ -436,6 +436,133 @@ barrier:   mean=89.2ns,  p99=98.4ns,  jitter=1.8ns   [PASS]
 
 ---
 
+## Ultra-Low-Latency (ULL) Mode
+
+### Overview
+
+ULL mode shifts feedback execution from software-mediated (~500ns) to hardware-autonomous (<50ns). Python handles setup and monitoring while the FPGA runs the feedback loop independently.
+
+### When to Use ULL
+
+- Feedback loops that must complete within 0.1% of coherence time
+- Surface code QEC with tight latency budgets
+- Short inter-board links (1-2m fiber)
+- Syndrome sizes up to 512 bits
+
+### ULL Latency Budget
+
+| Component | Target | Clock Cycles | How |
+|-----------|--------|-------------|-----|
+| Multicast | 10ns | 5 | Simplified Aurora, on-board links |
+| XOR Reduce | 4ns | 2 | Combinational logic |
+| LUT Decode | 8ns | 4 | BRAM lookup table |
+| Trigger | 2ns | 1 | Hardware register write |
+| **Total** | **<50ns** | **<25** | Within 0.1% of 50us coherence |
+
+### Quick Start
+
+```python
+from accl_quantum import ACCLQuantum, ACCLMode
+from accl_quantum.feedback import HardwareFeedbackEngine
+from accl_quantum.constants import ULLPipelineConfig
+
+# Option 1: ULL driver mode (zero-copy collectives)
+accl = ACCLQuantum(num_ranks=4, local_rank=0)
+accl.configure(mode=ACCLMode.ULTRA_LOW_LATENCY)
+result = accl.broadcast(data, root=0)
+# result.data is data  (zero-copy identity)
+
+# Option 2: Hardware feedback engine (autonomous cycles)
+config = ULLPipelineConfig(
+    max_syndrome_bits=16,
+    coherence_time_us=50.0,
+    fiber_length_m=1.0,
+)
+engine = HardwareFeedbackEngine(config)
+engine.program_pipeline(decoder_fn=my_decoder, syndrome_bits=16)
+
+result = engine.run_autonomous_cycle()
+print(f"Latency: {result.total_latency_ns}ns, within budget: {result.within_budget}")
+```
+
+### ULL Configuration
+
+```python
+from accl_quantum.constants import ULLPipelineConfig
+
+config = ULLPipelineConfig(
+    max_syndrome_bits=512,       # Max syndrome width
+    decoder_type='lut',          # 'lut' (BRAM) or 'combinational'
+    lut_depth=4096,              # LUT entries
+    use_hardware_multicast=True, # Hardware multicast fan-out
+    use_combinational_reduce=True, # Single-cycle XOR
+    coherence_time_us=50.0,      # Qubit coherence time
+    auto_trigger=True,           # Hardware trigger assertion
+    bypass_monitoring=True,      # Skip profiling in hot path
+    dma_buffer_count=16,         # Pre-allocated DMA buffers
+    fiber_length_m=1.0,          # Short links for ULL
+)
+```
+
+### Hardware Accelerator Components
+
+**DMA Buffer Pool**: Pre-allocated, cache-line-aligned buffers for zero-copy transfers.
+
+```python
+from accl_quantum.hardware_accel import DMABufferPool
+
+pool = DMABufferPool(num_buffers=16, buffer_size_bytes=64)
+buf = pool.acquire()   # Zero-allocation in hot path
+pool.release(buf)      # Return to pool
+```
+
+**LUT Decoder**: BRAM-based syndrome-to-correction lookup.
+
+```python
+from accl_quantum.hardware_accel import LUTDecoder
+
+decoder = LUTDecoder(num_syndrome_bits=16, lut_depth=4096)
+entries = decoder.program(my_decoder_function)
+correction = decoder.lookup(syndrome_array)
+bram_image = decoder.get_bram_image()  # For FPGA programming
+```
+
+**FPGA Register Interface**: Simulated register map for ULL pipeline control.
+
+```python
+from accl_quantum.hardware_accel import FPGARegisterInterface
+
+regs = FPGARegisterInterface()
+regs.arm_ull_pipeline()
+assert regs.is_pipeline_active()
+regs.disarm_ull_pipeline()
+```
+
+### Validating ULL Configuration
+
+```python
+from accl_quantum.hardware_accel import HardwareAccelerator
+
+accel = HardwareAccelerator(config)
+warnings = accel.validate_config()
+for w in warnings:
+    print(f"WARNING: {w}")
+
+estimated = accel.estimate_latency_ns()
+print(f"Estimated latency: {estimated:.1f}ns")
+```
+
+### Common ULL Issues
+
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| Latency > 50ns | Fiber too long | Reduce `fiber_length_m` to 1-2m |
+| LUT miss | Syndrome not in table | Increase `lut_depth` or use weight-3 enumeration |
+| Buffer exhaustion | Too many concurrent ops | Increase `dma_buffer_count` |
+| Jitter > 2ns | Software in hot path | Set `bypass_monitoring=True` |
+
+---
+
 ## See Also
 
 - [API Reference](api_reference.md) - Complete API documentation

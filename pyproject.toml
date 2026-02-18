@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "accl-quantum"
+version = "0.3.0"
+description = "Quantum-Optimized Alveo Collective Communication Library"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+authors = [
+    {name = "The AI Cowboys Projects", email = "ai-cowboys@example.com"},
+]
+keywords = ["quantum", "fpga", "collective-communication", "qec", "accl"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.100",
+    "uvicorn[standard]>=0.23",
+    "pydantic>=2.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "httpx>=0.24",
+]
+all = ["accl-quantum[server,dev]"]
+
+[project.urls]
+Homepage = "https://github.com/The-AI-Cowboys-Projects/ACCL_NEW"
+Repository = "https://github.com/The-AI-Cowboys-Projects/ACCL_NEW"
+
+[tool.setuptools.packages.find]
+where = ["driver/python"]
+
+[tool.pytest.ini_options]
+testpaths = ["test/quantum"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+
+[tool.setuptools.package-data]
+accl_quantum = ["docs/*.md"]
