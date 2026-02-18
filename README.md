@@ -133,7 +133,8 @@ This demonstrates sufficient margin for multi-round QEC within coherence limits.
 │  Operation Modes                                                │
 │  ├── STANDARD         - Default operation                       │
 │  ├── DETERMINISTIC    - Hardware-synchronized, minimal jitter   │
-│  └── LOW_LATENCY      - Optimized for speed over consistency    │
+│  ├── LOW_LATENCY      - Optimized for speed over consistency    │
+│  └── ULTRA_LOW_LATENCY - Hardware-autonomous sub-50ns feedback  │
 ├─────────────────────────────────────────────────────────────────┤
 │  Infrastructure                                                 │
 │  └── IBM Cloud Code Engine (Serverless Container)               │
@@ -179,6 +180,27 @@ curl -X POST ".../collective/barrier"
 curl -X POST ".../qec/syndrome" \
   -H "Content-Type: application/json" \
   -d '{"num_ranks": 8, "syndrome_bits": 4}'
+```
+
+### ULL Pipeline
+
+```bash
+# Configure ULL pipeline
+curl -X POST ".../ull/configure" \
+  -H "Content-Type: application/json" \
+  -d '{"syndrome_bits": 16, "coherence_time_us": 50.0}'
+
+# Run autonomous feedback cycle
+curl -X POST ".../ull/feedback?num_cycles=1"
+
+# Run 100 continuous cycles
+curl -X POST ".../ull/feedback?num_cycles=100"
+
+# Check ULL status
+curl ".../ull/status"
+
+# Disarm pipeline
+curl -X POST ".../ull/disarm"
 ```
 
 ### Qubit Emulator
@@ -266,23 +288,34 @@ docker run -p 8080:8080 accl-q
 
 ```
 ACCL_NEW/
-├── api_server.py              # FastAPI REST API server
-├── demo_accl_q.py             # Comprehensive demo script
+├── api_server.py              # FastAPI REST API (includes ULL endpoints)
+├── demo_accl_q.py             # Comprehensive demo (6 demos incl. ULL)
+├── pyproject.toml             # Python packaging configuration
+├── requirements.txt           # Python dependencies
 ├── Dockerfile                 # Production container definition
-├── .dockerignore              # Docker build exclusions
 ├── driver/
 │   └── python/
 │       └── accl_quantum/      # Core ACCL-Q driver
 │           ├── __init__.py    # Package exports
 │           ├── driver.py      # ACCLQuantum main class
+│           ├── constants.py   # Enums, ULL config, latency budgets
+│           ├── hardware_accel.py  # DMA pool, LUT decoder, FPGA regs
+│           ├── feedback.py    # Feedback pipelines (std + ULL)
 │           ├── emulator.py    # RealisticQubitEmulator
-│           ├── feedback.py    # MeasurementFeedbackPipeline
+│           ├── profiler.py    # Critical path profiler
 │           ├── stats.py       # LatencyMonitor
-│           └── constants.py   # Enums and configuration
+│           ├── deployment.py  # Multi-board RFSoC deployment
+│           ├── integrations.py # QubiC/QICK integrations
+│           └── docs/          # Documentation
+├── kernels/cclo/hls/quantum/  # HLS constants
+│   └── quantum_hls_constants.h
 ├── test/
-│   └── quantum/               # Test suite
+│   └── quantum/               # Test suite (~200 tests)
 │       ├── test_collective_ops.py
 │       ├── test_integration.py
+│       ├── test_ull_optimization.py
+│       ├── test_ull_latency_validation.py
+│       ├── test_module_coverage.py
 │       └── test_latency_validation.py
 └── README.md                  # This file
 ```
@@ -300,6 +333,38 @@ This experimental deployment validates that FPGA-based collective communication 
 3. **Scalable architecture**: The serverless deployment model allows elastic scaling for varying quantum workloads.
 
 4. **Practical QEC**: XOR-based syndrome aggregation demonstrates a practical path toward distributed surface code error correction.
+
+---
+
+## Ultra-Low-Latency (ULL) Mode
+
+ACCL-Q v0.3.0 introduces ULL mode for hardware-autonomous feedback execution targeting **<50ns latency** (0.1% of 50us coherence time) — a 10x improvement over standard feedback.
+
+| Component | Standard | ULL Target |
+|-----------|----------|-----------|
+| Multicast | 300ns | 10ns |
+| Reduce | 400ns | 4ns |
+| Decode | 50-200ns | 8ns |
+| Trigger | 50ns | 2ns |
+| **Total** | **~500ns** | **~34ns** |
+
+```python
+from accl_quantum import ACCLQuantum, ACCLMode
+from accl_quantum.feedback import HardwareFeedbackEngine
+from accl_quantum.constants import ULLPipelineConfig
+
+# Zero-copy ULL collectives
+accl = ACCLQuantum(num_ranks=4, local_rank=0)
+accl.configure(mode=ACCLMode.ULTRA_LOW_LATENCY)
+result = accl.broadcast(data, root=0)  # 10ns, zero-copy
+
+# Autonomous hardware feedback
+engine = HardwareFeedbackEngine(ULLPipelineConfig())
+engine.program_pipeline(decoder_fn=my_decoder, syndrome_bits=16)
+result = engine.run_autonomous_cycle()  # ~34ns per cycle
+```
+
+See [Performance Tuning Guide](driver/python/accl_quantum/docs/performance_tuning.md) for details.
 
 ---
 

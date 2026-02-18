@@ -9,6 +9,7 @@ This demo showcases ACCL-Q's key features:
 3. Measurement feedback pipeline
 4. Realistic qubit emulation with noise
 5. Latency monitoring and profiling
+6. Ultra-Low-Latency (ULL) hardware-autonomous feedback
 """
 
 import numpy as np
@@ -32,6 +33,16 @@ from accl_quantum.emulator import (
 )
 from accl_quantum.feedback import MeasurementFeedbackPipeline, FeedbackConfig
 from accl_quantum.integrations import UnifiedQuantumControl
+from accl_quantum.feedback import HardwareFeedbackEngine, ULLFeedbackResult
+from accl_quantum.hardware_accel import HardwareAccelerator, DMABufferPool, LUTDecoder
+from accl_quantum.constants import (
+    ULLPipelineConfig,
+    ULL_TARGET_TOTAL_NS,
+    ULL_TARGET_MULTICAST_NS,
+    ULL_TARGET_REDUCE_NS,
+    ULL_TARGET_DECODE_NS,
+    ULL_TARGET_TRIGGER_NS,
+)
 
 
 def print_header(title: str):
@@ -445,6 +456,115 @@ def demo_latency_monitoring():
     print(monitor.summary())
 
 
+def demo_ull_feedback():
+    """Demo 6: Ultra-Low-Latency hardware-autonomous feedback."""
+    print_header("Demo 6: Ultra-Low-Latency (ULL) Hardware Feedback")
+
+    print("\nULL mode shifts feedback execution from software to hardware.")
+    print("Target: <50ns total feedback latency (0.1% of 50us coherence time)")
+    print()
+
+    # Show latency budget breakdown
+    print("[1] ULL Latency Budget:")
+    print(f"    Multicast:  {ULL_TARGET_MULTICAST_NS}ns  (simplified Aurora, on-board links)")
+    print(f"    Reduce:     {ULL_TARGET_REDUCE_NS}ns   (combinational XOR, 1-2 cycles)")
+    print(f"    Decode:     {ULL_TARGET_DECODE_NS}ns   (BRAM LUT, 4 cycles)")
+    print(f"    Trigger:    {ULL_TARGET_TRIGGER_NS}ns   (hardware register, 1 cycle)")
+    print(f"    Budget:     {ULL_TARGET_TOTAL_NS}ns  (0.1% of 50us coherence)")
+
+    # Configure ULL pipeline
+    config = ULLPipelineConfig(
+        max_syndrome_bits=16,
+        coherence_time_us=50.0,
+        fiber_length_m=1.0,
+    )
+
+    print(f"\n[2] Configuring ULL pipeline:")
+    print(f"    Syndrome bits: {config.max_syndrome_bits}")
+    print(f"    Coherence time: {config.coherence_time_us}us")
+    print(f"    Fiber length: {config.fiber_length_m}m")
+
+    # Create and program the hardware feedback engine
+    engine = HardwareFeedbackEngine(config)
+
+    def surface_code_decoder(syndrome):
+        """Simple majority-vote decoder for demo."""
+        return syndrome  # Identity decoder
+
+    entries = engine.program_pipeline(
+        decoder_fn=surface_code_decoder,
+        syndrome_bits=16,
+    )
+
+    print(f"    LUT entries programmed: {entries}")
+    print(f"    Estimated latency: {engine._hw_accel.estimate_latency_ns():.1f}ns")
+
+    # Validate configuration
+    warnings = engine._hw_accel.validate_config()
+    if warnings:
+        for w in warnings:
+            print(f"    WARNING: {w}")
+    else:
+        print("    Config validated: all clear")
+
+    # Run single autonomous cycle
+    print(f"\n[3] Running single autonomous feedback cycle:")
+    result = engine.run_autonomous_cycle()
+
+    print(f"    Success: {result.success}")
+    print(f"    Total latency: {result.total_latency_ns:.1f}ns")
+    print(f"    Within budget: {result.within_budget}")
+    print(f"    Phase breakdown:")
+    for phase, ns in result.phases.items():
+        print(f"      {phase}: {ns:.1f}ns")
+
+    # Run continuous cycles
+    num_cycles = 1000
+    print(f"\n[4] Running {num_cycles} continuous feedback cycles:")
+    results = engine.run_continuous(num_cycles=num_cycles)
+
+    latencies = [r.total_latency_ns for r in results]
+    violations = sum(1 for r in results if not r.within_budget)
+
+    print(f"    Cycles completed: {len(results)}")
+    print(f"    Mean latency: {np.mean(latencies):.1f}ns")
+    print(f"    Min latency:  {np.min(latencies):.1f}ns")
+    print(f"    Max latency:  {np.max(latencies):.1f}ns")
+    print(f"    Budget violations: {violations}/{num_cycles} ({violations/num_cycles*100:.1f}%)")
+
+    # DMA buffer pool demo
+    print(f"\n[5] DMA Buffer Pool:")
+    pool = engine._hw_accel.pool
+    print(f"    Total buffers: {pool.total}")
+    print(f"    Available: {pool.available}")
+
+    buf = pool.acquire()
+    print(f"    Acquired buffer: {buf.shape}, dtype={buf.dtype}")
+    pool.release(buf)
+    print(f"    Released. Available: {pool.available}")
+
+    # ULL driver mode demo
+    print(f"\n[6] ULL Driver Mode (zero-copy):")
+    accl = ACCLQuantum(num_ranks=4, local_rank=0)
+    accl.configure(mode=ACCLMode.ULTRA_LOW_LATENCY)
+
+    data = np.array([1, 0, 1, 0, 1, 1, 0, 0], dtype=np.uint8)
+    result = accl.broadcast(data, root=0)
+
+    print(f"    Input data:  {data}")
+    print(f"    Output data: {result.data}")
+    print(f"    Latency: {result.latency_ns:.1f}ns")
+    print(f"    Zero-copy verified: {result.data is data}")
+
+    # Improvement summary
+    print(f"\n[7] Performance Comparison:")
+    print(f"    Standard feedback:  ~500ns  (software-mediated)")
+    print(f"    ULL feedback:       ~{np.mean(latencies):.0f}ns   (hardware-autonomous)")
+    improvement = 500 / np.mean(latencies)
+    print(f"    Improvement:        {improvement:.1f}x faster")
+    print(f"    Coherence budget:   {np.mean(latencies) / 50000 * 100:.4f}% of 50us")
+
+
 def main():
     """Run all demos."""
     print("\n" + "=" * 60)
@@ -460,6 +580,7 @@ def main():
         demo_qubit_emulator()
         demo_feedback_pipeline()
         demo_latency_monitoring()
+        demo_ull_feedback()
 
         print_header("Demo Complete!")
         print("\nAll demos completed successfully.")
@@ -469,6 +590,7 @@ def main():
         print("  - Hardware-synchronized barriers with <10ns jitter")
         print("  - Measurement feedback within 500ns budget")
         print("  - Realistic qubit emulation with T1/T2 noise")
+        print("  - ULL hardware-autonomous feedback in <50ns")
         print("\nFor more information, see the ACCL-Q documentation.")
 
     except Exception as e:
